@@ -37,16 +37,20 @@ public class CuttingOrderService {
 
     private final CuttingOrderRepository orderRepository;
     private final BlockRepository blockRepository;
+    private final SawBatchService sawBatchService;
 
-    public CuttingOrderService(CuttingOrderRepository orderRepository, BlockRepository blockRepository) {
+    public CuttingOrderService(CuttingOrderRepository orderRepository, BlockRepository blockRepository,
+                               SawBatchService sawBatchService) {
         this.orderRepository = orderRepository;
         this.blockRepository = blockRepository;
+        this.sawBatchService = sawBatchService;
     }
 
     public PageResult<CuttingOrderView> page(OrderQuery query) {
         Map<Long, Block> blocks = blockMap();
+        Map<Long, SawBatchService.OrderSawStats> sawStats = sawBatchService.orderStatsMap();
         List<CuttingOrderView> rows = orderRepository.search(query).stream()
-                .map(order -> toView(order, blocks))
+                .map(order -> toView(order, blocks, sawStats.get(order.getId())))
                 .collect(Collectors.toList());
         return new PageResult<>(rows, orderRepository.count(query),
                 query.getPage(), query.getSize());
@@ -54,13 +58,14 @@ public class CuttingOrderService {
 
     public List<CuttingOrderView> listAll() {
         Map<Long, Block> blocks = blockMap();
+        Map<Long, SawBatchService.OrderSawStats> sawStats = sawBatchService.orderStatsMap();
         return orderRepository.search(new OrderQuery()).stream()
-                .map(order -> toView(order, blocks))
+                .map(order -> toView(order, blocks, sawStats.get(order.getId())))
                 .collect(Collectors.toList());
     }
 
     public CuttingOrderView detail(Long id) {
-        return toView(require(id), blockMap());
+        return toView(require(id), blockMap(), sawBatchService.orderStats(id));
     }
 
     @Transactional
@@ -90,7 +95,7 @@ public class CuttingOrderService {
         order.setStatus("PENDING");
         order.setRemark(req.getRemark());
         orderRepository.save(order);
-        return toView(order, blockMap());
+        return toView(order, blockMap(), sawBatchService.orderStats(order.getId()));
     }
 
     /** 开工：工单置加工中，荒料置加工中，补开工日期。 */
@@ -108,15 +113,19 @@ public class CuttingOrderService {
             block.setStatus("PROCESSING");
             blockRepository.save(block);
         }
-        return toView(order, blockMap());
+        return toView(order, blockMap(), sawBatchService.orderStats(order.getId()));
     }
 
-    /** 登记完成板数（累加，不得超过计划板数）。 */
+    /** 登记完成板数（累加，不得超过计划板数）。已纳入锯切批次的工单改由批次收口按实产推进。 */
     @Transactional
     public CuttingOrderView progress(Long id, ProgressReq req) {
         CuttingOrder order = require(id);
         if ("SETTLED".equals(order.getStatus())) {
             throw new BizException("已结算的工单不能再登记进度");
+        }
+        if (order.getSawBaselineCount() != null) {
+            throw new BizException("工单已纳入锯切批次交接，完成板数只能由批次收口按合格实产推进，不能手工 +1"
+                    + "（逐片扫码登记并核清差异后在批次上收口）");
         }
         int delta = req == null || req.getDelta() == null ? 1 : req.getDelta();
         if (delta <= 0) {
@@ -131,15 +140,19 @@ public class CuttingOrderService {
             order.setStatus("PROCESSING");
         }
         orderRepository.save(order);
-        return toView(order, blockMap());
+        return toView(order, blockMap(), sawBatchService.orderStats(order.getId()));
     }
 
-    /** 完工：按计划板数补齐，工单置已完工，荒料置已完料。 */
+    /** 完工：按计划板数补齐，工单置已完工，荒料置已完料。已纳入批次的工单不能手工补齐。 */
     @Transactional
     public CuttingOrderView finish(Long id) {
         CuttingOrder order = require(id);
         if ("DONE".equals(order.getStatus()) || "SETTLED".equals(order.getStatus())) {
             throw new BizException("该工单已经完工");
+        }
+        if (order.getSawBaselineCount() != null) {
+            throw new BizException("工单已纳入锯切批次交接，不能手工按计划板数补齐完工；"
+                    + "请在各锯切批次核清差异并收口后，由合格实产推进完工");
         }
         order.setDoneCount(order.getPlanCount());
         order.setStatus("DONE");
@@ -153,7 +166,7 @@ public class CuttingOrderService {
             block.setStatus("DONE");
             blockRepository.save(block);
         }
-        return toView(order, blockMap());
+        return toView(order, blockMap(), sawBatchService.orderStats(order.getId()));
     }
 
     /** 结算：只有已完工能结算。 */
@@ -165,7 +178,7 @@ public class CuttingOrderService {
         }
         order.setStatus("SETTLED");
         orderRepository.save(order);
-        return toView(order, blockMap());
+        return toView(order, blockMap(), sawBatchService.orderStats(order.getId()));
     }
 
     private CuttingOrder require(Long id) {
@@ -177,7 +190,8 @@ public class CuttingOrderService {
                 .collect(Collectors.toMap(Block::getId, Function.identity(), (a, b) -> a));
     }
 
-    private CuttingOrderView toView(CuttingOrder order, Map<Long, Block> blocks) {
+    private CuttingOrderView toView(CuttingOrder order, Map<Long, Block> blocks,
+                                    SawBatchService.OrderSawStats saw) {
         Block block = blocks.get(order.getBlockId());
         CuttingOrderView view = new CuttingOrderView();
         view.setId(order.getId());
@@ -199,6 +213,17 @@ public class CuttingOrderService {
         view.setStatus(order.getStatus());
         view.setStatusName(StoneDict.orderStatusName(order.getStatus()));
         view.setRemark(order.getRemark());
+        if (saw != null) {
+            view.setSawTracked(saw.tracked);
+            view.setSawBaselineCount(saw.baseline);
+            view.setSawQualifiedCount(saw.qualifiedClosed);
+            view.setSawBatchCount(saw.batchCount);
+            view.setSawPendingBatchCount(saw.pendingBatchCount);
+            view.setSawOpenDiffCount(saw.openDiffCount);
+        } else {
+            view.setSawTracked(order.getSawBaselineCount() != null);
+            view.setSawBaselineCount(order.getSawBaselineCount());
+        }
         return view;
     }
 }

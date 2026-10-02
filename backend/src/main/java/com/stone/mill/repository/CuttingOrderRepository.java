@@ -30,6 +30,17 @@ public class CuttingOrderRepository {
         return Optional.ofNullable(em.find(CuttingOrder.class, id));
     }
 
+    /**
+     * 悲观行锁取工单（必须在事务内调用）：锯切批次收口回写完成数时串行化，
+     * 两个批次同时收口 / 重复点击收口不会在完成数上丢更新。
+     */
+    public CuttingOrder lockById(Long id) {
+        return em.createQuery("SELECT o FROM CuttingOrder o WHERE o.id = :id", CuttingOrder.class)
+                .setParameter("id", id)
+                .setLockMode(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+                .getResultList().stream().findFirst().orElse(null);
+    }
+
     public void save(CuttingOrder order) {
         if (order.getId() == null) {
             em.persist(order);

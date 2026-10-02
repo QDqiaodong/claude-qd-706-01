@@ -31,7 +31,14 @@ export const navItems = [
     path: '/orders',
     icon: '⌁',
     label: '加工工单',
-    hint: '锯切方式·计划/已完成板数·进度条'
+    hint: '锯切方式·计划/已完成板数·批次谱系'
+  },
+  {
+    key: 'saw',
+    path: '/saw',
+    icon: '⛓',
+    label: '锯切批次',
+    hint: '开锯冻结·逐片交接·差异待核·收口谱系'
   },
   {
     key: 'deliveries',
@@ -55,6 +62,7 @@ const routes = [
   { path: '/blocks', name: 'blocks', component: () => import('../views/BlockView.vue') },
   { path: '/slabs', name: 'slabs', component: () => import('../views/SlabView.vue') },
   { path: '/orders', name: 'orders', component: () => import('../views/CuttingOrderView.vue') },
+  { path: '/saw', name: 'saw', component: () => import('../views/SawBatchView.vue') },
   { path: '/deliveries', name: 'deliveries', component: () => import('../views/DeliveryView.vue') },
   { path: '/quality', name: 'quality', component: () => import('../views/QualityHoldView.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/layout' }

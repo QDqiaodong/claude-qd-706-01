@@ -147,6 +147,56 @@ public final class StoneDict {
             "REWORK", "返工观察",
             "SCRAP", "报废");
 
+    // ---------------- 锯切批次 ----------------
+    private static final Map<String, String> SAW_BATCH_STATUS = Map.of(
+            "OPEN", "开锯交接中",
+            "PENDING_RECONCILE", "差异待核",
+            "READY", "可收口",
+            "CLOSED", "已收口");
+
+    /** 未收口（仍在交接 / 待核 / 待收口）的批次状态 */
+    public static final java.util.List<String> SAW_BATCH_OPEN_STATUS =
+            java.util.List.of("OPEN", "PENDING_RECONCILE", "READY");
+
+    // ---------------- 逐片产出类型 ----------------
+    private static final Map<String, String> SAW_OUTPUT_TYPE = Map.of(
+            "FINISHED", "成品",
+            "REMNANT", "可返切余料",
+            "SAW_LOSS", "锯耗");
+
+    // ---------------- 逐片产出状态 ----------------
+    private static final Map<String, String> SAW_OUTPUT_STATUS = Map.of(
+            "ACTIVE", "有效",
+            "VOID", "已作废");
+
+    // ---------------- 计划实产差异类型 ----------------
+    private static final Map<String, String> SAW_DIFF_TYPE = Map.of(
+            "MISSING_SEQ", "缺号",
+            "DUP_SEQ", "重复号",
+            "SIZE_TOLERANCE", "尺寸超差",
+            "COUNT_MISMATCH", "数量不符",
+            "UNEXPLAINED_SAW_LOSS", "未解释锯耗");
+
+    // ---------------- 差异核清状态 ----------------
+    private static final Map<String, String> SAW_DIFF_STATUS = Map.of(
+            "OPEN", "差异待核",
+            "CONFIRMED", "已确认",
+            "CORRECTED", "已更正");
+
+    // ---------------- 谱系留痕事件 ----------------
+    private static final Map<String, String> SAW_AUDIT_EVENT = Map.of(
+            "CREATE_BATCH", "开锯建批",
+            "REGISTER_OUTPUT", "逐片登记",
+            "SUBMIT_HANDOVER", "交接提交",
+            "CONFIRM_DIFF", "确认实际结果",
+            "CORRECT_OUTPUT", "归属更正",
+            "VOID_OUTPUT", "作废产出",
+            "CLOSE_BATCH", "批次收口",
+            "RECOMPUTE", "差异重算");
+
+    /** 尺寸允差（cm）：实际长/宽与冻结计划偏差超过该值即「尺寸超差」 */
+    public static final int SIZE_TOLERANCE_CM = 3;
+
     // ---------------- 取值 ----------------
 
     public static boolean isValidStoneType(String v) {
@@ -271,5 +321,45 @@ public final class StoneDict {
 
     public static String reconcileResultName(String v) {
         return v == null ? "" : RECONCILE_RESULT.getOrDefault(v, v);
+    }
+
+    public static boolean isValidSawBatchStatus(String v) {
+        return v != null && SAW_BATCH_STATUS.containsKey(v);
+    }
+
+    public static String sawBatchStatusName(String v) {
+        return v == null ? "" : SAW_BATCH_STATUS.getOrDefault(v, v);
+    }
+
+    public static boolean isSawBatchOpen(String v) {
+        return v != null && SAW_BATCH_OPEN_STATUS.contains(v);
+    }
+
+    public static boolean isValidOutputType(String v) {
+        return v != null && SAW_OUTPUT_TYPE.containsKey(v);
+    }
+
+    public static String outputTypeName(String v) {
+        return v == null ? "" : SAW_OUTPUT_TYPE.getOrDefault(v, v);
+    }
+
+    public static String outputStatusName(String v) {
+        return v == null ? "" : SAW_OUTPUT_STATUS.getOrDefault(v, v);
+    }
+
+    public static boolean isValidDiffType(String v) {
+        return v != null && SAW_DIFF_TYPE.containsKey(v);
+    }
+
+    public static String diffTypeName(String v) {
+        return v == null ? "" : SAW_DIFF_TYPE.getOrDefault(v, v);
+    }
+
+    public static String diffStatusName(String v) {
+        return v == null ? "" : SAW_DIFF_STATUS.getOrDefault(v, v);
+    }
+
+    public static String sawAuditEventName(String v) {
+        return v == null ? "" : SAW_AUDIT_EVENT.getOrDefault(v, v);
     }
 }

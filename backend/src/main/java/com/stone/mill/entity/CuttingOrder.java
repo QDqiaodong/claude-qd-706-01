@@ -36,6 +36,15 @@ public class CuttingOrder {
     @Column(name = "done_count")
     private Integer doneCount;
 
+    /**
+     * 锯切批次基线完成数：
+     * null 表示批次功能上线前的旧工单（仍按原手工方式登记完成数，页面标「待补交接」）；
+     * 非 null 表示已纳入锯切批次交接，首个批次建立时固化当时的 doneCount，
+     * 此后 doneCount = sawBaselineCount + Σ 已收口批次的合格实产，不能再手工 +1。
+     */
+    @Column(name = "saw_baseline_count")
+    private Integer sawBaselineCount;
+
     @Column(name = "start_date")
     private LocalDate startDate;
 

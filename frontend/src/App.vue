@@ -97,8 +97,59 @@
             <el-tag size="small" type="danger">{{ slab.qualityHoldStatusName }} · {{ slab.qualityDefectName }}</el-tag>
             <div class="panel-sub">{{ slab.qualityHoldNo }} · 发货冻结中</div>
           </el-descriptions-item>
+          <el-descriptions-item label="锯切谱系">
+            <div v-if="slab.sawTracked">
+              归属批次 <b>{{ slab.sawBatchNo }}</b>（{{ slab.sawBatchStatusName }}）
+            </div>
+            <span v-else class="panel-sub">未挂锯切产出（批次功能前的旧大板或尚未交接）</span>
+          </el-descriptions-item>
           <el-descriptions-item label="备注">{{ slab.remark || '—' }}</el-descriptions-item>
         </el-descriptions>
+
+        <!-- 锯切批次反查：所属批次 + 历次更正 -->
+        <div v-if="sawTrace && sawTrace.outputs && sawTrace.outputs.length" class="saw-trace">
+          <div class="saw-trace-title">锯切谱系反查</div>
+          <el-descriptions :column="1" border size="small">
+            <el-descriptions-item label="当前归属">
+              <template v-if="sawTrace.currentBatchNo">
+                <b>{{ sawTrace.currentBatchNo }}</b> · {{ sawTrace.currentBatchStatusName }}
+                · {{ sawTrace.currentOutputTypeName }} · 第 {{ sawTrace.currentSeqNo || '—' }} 序
+              </template>
+              <span v-else class="panel-sub">当前无有效归属（产出已作废 / 仅历史记录）</span>
+            </el-descriptions-item>
+          </el-descriptions>
+          <el-table :data="sawTrace.outputs" size="small" border style="margin-top: 8px">
+            <el-table-column label="批次">
+              <template #default="{ row }">{{ batchNoOf(row.batchId) }}</template>
+            </el-table-column>
+            <el-table-column label="顺序" width="60" align="center">
+              <template #default="{ row }">{{ row.seqNo || '—' }}</template>
+            </el-table-column>
+            <el-table-column prop="outputTypeName" label="类型" width="92" />
+            <el-table-column label="尺寸" width="120">
+              <template #default="{ row }">{{ row.actualLength ? row.actualLength + '×' + row.actualWidth : '—' }}</template>
+            </el-table-column>
+            <el-table-column label="状态" width="76">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.status === 'ACTIVE' ? 'success' : 'info'">{{ row.statusName }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="登记时间" width="150">
+              <template #default="{ row }">{{ fmtTrace(row.registeredAt) }}</template>
+            </el-table-column>
+          </el-table>
+          <div class="saw-trace-title" style="margin-top: 10px">历次更正 / 留痕</div>
+          <el-timeline>
+            <el-timeline-item v-for="a in sawTrace.audits" :key="a.id"
+                              :timestamp="(a.operator || '') + ' · ' + fmtTrace(a.createdAt)" placement="top">
+              <b>{{ a.eventTypeName }}</b> <span class="panel-sub">{{ a.batchNo }}</span>
+              <div v-if="a.fromContent" class="trace-from">变更前：{{ a.fromContent }}</div>
+              <div v-if="a.toContent">变更后：{{ a.toContent }}</div>
+              <div v-if="a.reason" class="trace-reason">原因：{{ a.reason }}</div>
+            </el-timeline-item>
+          </el-timeline>
+        </div>
+
         <div style="margin-top: 14px">
           <el-button type="warning" @click="gotoQuality">质量处置</el-button>
           <el-button type="primary" @click="gotoSlab">到大板库存页</el-button>
@@ -112,7 +163,7 @@
 import { computed, getCurrentInstance, onMounted, provide, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import router, { navItems } from './router'
-import { millApi, slabApi } from './api'
+import { millApi, slabApi, sawApi } from './api'
 
 /**
  * 模板自带的 main.js 只装了 Element Plus，没装 router（那份文件不动它），
@@ -152,6 +203,7 @@ const treeLoading = ref(false)
 const selectedBlockId = ref(null)
 const slabVisible = ref(false)
 const slab = ref({})
+const sawTrace = ref(null)
 
 /** 全局上下文：所有页面 inject('mill') */
 const mill = { filters, overview, tree, selectedBlockId, refreshOverview: loadOverview, refreshTree: loadTree }
@@ -202,7 +254,24 @@ async function onNodeClick(data) {
   }
   const detail = await slabApi.detail(data.id)
   slab.value = detail
+  sawTrace.value = null
+  // 锯切谱系反查（无产出时后端返回空 outputs，不阻断详情）
+  try {
+    sawTrace.value = await sawApi.traceBySlab(data.id)
+  } catch (e) {
+    sawTrace.value = null
+  }
   slabVisible.value = true
+}
+
+function fmtTrace(v) {
+  return v ? String(v).replace('T', ' ').slice(0, 16) : '—'
+}
+
+function batchNoOf(batchId) {
+  if (!sawTrace.value) return ''
+  const found = (sawTrace.value.audits || []).find((a) => a.batchId === batchId)
+  return found ? found.batchNo : ('#' + batchId)
 }
 
 function gotoSlab() {
@@ -238,5 +307,28 @@ onMounted(async () => {
   font-size: 10px;
   line-height: 9px;
   color: var(--mill-primary);
+}
+
+.saw-trace {
+  margin-top: 14px;
+  border-top: 1px dashed #cfd8dc;
+  padding-top: 10px;
+}
+
+.saw-trace-title {
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 6px;
+  color: var(--mill-primary);
+}
+
+.trace-from {
+  color: #90a4ae;
+  font-size: 12px;
+}
+
+.trace-reason {
+  color: #e6a23c;
+  font-size: 12px;
 }
 </style>

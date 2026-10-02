@@ -49,6 +49,11 @@ public class SlabRepository {
         }
     }
 
+    /** 立即落库，让大板编号唯一冲突在业务代码处抛出（锯切登记新建大板用）。 */
+    public void flush() {
+        em.flush();
+    }
+
     public Slab findByCode(String slabCode) {
         CriteriaBuilder cb = em.getCriteriaBuilder();
         CriteriaQuery<Slab> cq = cb.createQuery(Slab.class);

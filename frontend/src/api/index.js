@@ -99,3 +99,16 @@ export const qualityApi = {
   recheck: (id, data) => http.post(`/quality-holds/${id}/recheck`, data),
   scrap: (id, data) => http.post(`/quality-holds/${id}/scrap`, data)
 }
+
+/** 模块八~十二：锯切批次交接与产出谱系 */
+export const sawApi = {
+  page: (params) => http.get('/saw-batches', { params }),
+  byOrder: (orderId) => http.get('/saw-batches/by-order', { params: { orderId } }),
+  detail: (id) => http.get(`/saw-batches/${id}`),
+  traceBySlab: (slabId) => http.get('/saw-batches/trace-by-slab', { params: { slabId } }),
+  create: (data) => http.post('/saw-batches', data),
+  register: (id, data) => http.post(`/saw-batches/${id}/outputs`, data),
+  handover: (id, data) => http.post(`/saw-batches/${id}/handover`, data),
+  resolveDiff: (diffId, data) => http.post(`/saw-batches/discrepancies/${diffId}/resolve`, data),
+  close: (id, data) => http.post(`/saw-batches/${id}/close`, data)
+}
