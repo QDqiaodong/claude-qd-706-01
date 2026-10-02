@@ -202,4 +202,127 @@ public final class Dtos {
 
         private String operator;
     }
+
+    // ---------------- 锯切批次交接与产出谱系 ----------------
+
+    /** 开锯建立批次：冻结工单（荒料/锯切方式随之快照）与排板顺序 */
+    @Data
+    public static class BatchCreateReq {
+
+        @NotNull(message = "加工工单不能为空")
+        private Long orderId;
+
+        /** 尺寸超差阈值 cm，可空默认 2 */
+        private Integer toleranceCm;
+
+        private String operator;
+    }
+
+    /**
+     * 交接逐片登记：
+     * clientToken 为现场扫码幂等令牌，断网重试 / 重复扫码同 token 只产生一片；
+     * FINISHED / REMNANT 必须给大板编号（不存在且在本批荒料上则自动建档）；
+     * SAW_LOSS 必须在 note 填写损耗原因，否则挂「未解释锯耗」差异。
+     */
+    @Data
+    public static class OutputRegisterReq {
+
+        @NotBlank(message = "现场扫码令牌不能为空（断网重试靠它幂等）")
+        private String clientToken;
+
+        @NotBlank(message = "产出类型不能为空：FINISHED / REMNANT / SAW_LOSS")
+        private String outputType;
+
+        private String slabCode;
+
+        /** 对应排板顺序号（计划外余料可空） */
+        private Integer seqNo;
+
+        private Integer actualLengthCm;
+        private Integer actualWidthCm;
+        private java.math.BigDecimal thicknessCm;
+
+        /** 返切来源大板 id（可空：普通荒料锯切） */
+        private Long sourceSlabId;
+
+        private String operator;
+
+        private String producedAt;
+
+        /** 现场备注（锯耗原因） */
+        private String note;
+    }
+
+    /** 交接：班组完成逐片登记，批次进入差异待核 */
+    @Data
+    public static class HandoverReq {
+
+        private String operator;
+        private String note;
+    }
+
+    /** 差异逐项核清：必须填原因 */
+    @Data
+    public static class DiffResolveReq {
+
+        @NotBlank(message = "核清方式不能为空：CONFIRM / REASSIGN / VOID")
+        private String resolution;
+
+        @NotBlank(message = "必须填写核清原因，差异不允许无说明关闭")
+        private String reason;
+
+        private String operator;
+    }
+
+    /**
+     * 跨批次更正归属：把误登到本批的产出改派到真正归属批次（保留先到规则，不静默覆盖）。
+     * 目标批次下可同时更正顺序号。
+     */
+    @Data
+    public static class ReassignReq {
+
+        @NotNull(message = "目标批次不能为空")
+        private Long targetBatchId;
+
+        private Integer targetSeqNo;
+
+        @NotBlank(message = "改派原因不能为空")
+        private String reason;
+
+        private String operator;
+    }
+
+    /** 更正登记内容（实际尺寸 / 顺序 / 锯耗原因），用于 FIX 核清 */
+    @Data
+    public static class OutputCorrectReq {
+
+        private Integer seqNo;
+        private Integer actualLengthCm;
+        private Integer actualWidthCm;
+        private java.math.BigDecimal thicknessCm;
+        private String note;
+
+        @NotBlank(message = "更正原因不能为空")
+        private String reason;
+
+        private String operator;
+    }
+
+    /** 作废误登产出：必须填原因；已被后续批次返切引用的产出禁止作废 */
+    @Data
+    public static class OutputVoidReq {
+
+        @NotBlank(message = "作废原因不能为空")
+        private String reason;
+
+        private String operator;
+    }
+
+    /** 收口批次：只有差异全部核清才放行 */
+    @Data
+    public static class BatchCloseReq {
+
+        private String operator;
+        private String remark;
+    }
 }

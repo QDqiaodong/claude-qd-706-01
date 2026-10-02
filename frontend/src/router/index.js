@@ -46,6 +46,13 @@ export const navItems = [
     icon: '⛔',
     label: '质量处置',
     hint: '隔离·复检放行·报废收口·发货冻结'
+  },
+  {
+    key: 'saw',
+    path: '/saw',
+    icon: '🧬',
+    label: '锯切批次',
+    hint: '开锯冻结·逐片交接·差异待核·收口谱系'
   }
 ]
 
@@ -57,6 +64,7 @@ const routes = [
   { path: '/orders', name: 'orders', component: () => import('../views/CuttingOrderView.vue') },
   { path: '/deliveries', name: 'deliveries', component: () => import('../views/DeliveryView.vue') },
   { path: '/quality', name: 'quality', component: () => import('../views/QualityHoldView.vue') },
+  { path: '/saw', name: 'saw', component: () => import('../views/SawBatchView.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/layout' }
 ]
 

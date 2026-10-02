@@ -65,6 +65,17 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * 乐观锁冲突：409。批次收口 / 并发更新只有一个生效，失败方刷新到最新结果，
+     * 不允许出现「批次状态、归属、工单完成数」半成品。
+     */
+    @ExceptionHandler(org.springframework.orm.ObjectOptimisticLockingFailureException.class)
+    public ResponseEntity<ApiResponse<Void>> handleOptimistic(
+            org.springframework.orm.ObjectOptimisticLockingFailureException e) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(new ApiResponse<>(false, "数据刚被其他人更新，只有一个操作生效，请刷新到最新结果后重试", null));
+    }
+
+    /**
      * 兜底：500
      */
     @ExceptionHandler(Exception.class)

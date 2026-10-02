@@ -109,6 +109,16 @@ public final class Views {
         private String qualityHoldStatusName;
         /** 当前隔离主要缺陷（中文名） */
         private String qualityDefectName;
+
+        // —— 模块八：产出谱系反查 ——
+        /** 是否存在有效（未作废）锯切批次产出归属 */
+        private boolean sawTracked;
+        /** 当前所属锯切批次号 */
+        private String sawBatchNo;
+        /** 当前产出类型（成品 / 余料 / 锯耗） */
+        private String sawOutputTypeName;
+        /** 所属批次是否已收口固化 */
+        private boolean sawBatchClosed;
     }
 
     @Data
@@ -150,6 +160,17 @@ public final class Views {
         private String status;
         private String statusName;
         private String remark;
+        // —— 模块八：锯切批次谱系 ——
+        /** 该工单是否已有锯切批次；false 时工单详情明确标「待补交接」，仍按旧方式查看 */
+        private boolean batchManaged;
+        /** 批次数 */
+        private int batchCount;
+        /** 已收口批次数 */
+        private int closedBatchCount;
+        /** 当前未核清差异条数 */
+        private int openDiffCount;
+        /** 已收口批次固化的合格实产合计（工单完成数应与之保持一致） */
+        private int closedFinishedTotal;
     }
 
     // ---------------- 排板方案 ----------------
@@ -383,6 +404,185 @@ public final class Views {
         private long scrappedCount;
         /** 当前被质量挂起禁运的待装车发货单数 */
         private long blockedDeliveryCount;
+    }
+
+    // ---------------- 锯切批次交接与产出谱系 ----------------
+
+    @Data
+    public static class SawPlanView {
+
+        private Long id;
+        private Integer seqNo;
+        private Integer planLengthCm;
+        private Integer planWidthCm;
+        private String slabCode;
+        /** 该顺序当前实产片数（LIVE） */
+        private int outputCount;
+    }
+
+    @Data
+    public static class SawOutputView {
+
+        private Long id;
+        private Long batchId;
+        private String clientToken;
+        private Long slabId;
+        private String slabCode;
+        private String outputType;
+        private String outputTypeName;
+        private Integer seqNo;
+        private Integer actualLengthCm;
+        private Integer actualWidthCm;
+        private BigDecimal thicknessCm;
+        private Long sourceSlabId;
+        private String sourceSlabCode;
+        private Long sourceOutputId;
+        private String operator;
+        private LocalDateTime producedAt;
+        private String note;
+        private String status;
+        private String statusName;
+        private String voidReason;
+        private String voidBy;
+        private LocalDateTime voidAt;
+        private LocalDateTime createdAt;
+        /** 实际尺寸对照冻结计划是否超差 */
+        private boolean sizeOutOfTolerance;
+        /** 尺寸偏差描述（如 长 -5cm） */
+        private String sizeDeviation;
+        /** 是否已被后续批次作为返切来源引用（引用中禁止作废） */
+        private boolean referencedByLaterBatch;
+    }
+
+    @Data
+    public static class SawDiffView {
+
+        private Long id;
+        private Long batchId;
+        private String diffType;
+        private String diffTypeName;
+        private Integer seqNo;
+        private Long slabId;
+        private String slabCode;
+        private String detail;
+        private String status;
+        private String statusName;
+        private String resolution;
+        private String resolutionName;
+        private String resolveReason;
+        private String resolvedBy;
+        private LocalDateTime resolvedAt;
+        private LocalDateTime createdAt;
+    }
+
+    @Data
+    public static class SawChangeView {
+
+        private Long id;
+        private Long batchId;
+        private String batchNo;
+        private Long outputId;
+        private String changeType;
+        private String changeTypeName;
+        private Long fromBatchId;
+        private String fromBatchNo;
+        private Long toBatchId;
+        private String toBatchNo;
+        private String beforeJson;
+        private String afterJson;
+        private String reason;
+        private String operator;
+        private LocalDateTime createdAt;
+    }
+
+    @Data
+    public static class SawEventView {
+
+        private Long id;
+        private String eventType;
+        private String eventTypeName;
+        private String fromStatus;
+        private String fromStatusName;
+        private String toStatus;
+        private String toStatusName;
+        private String content;
+        private String operator;
+        private LocalDateTime createdAt;
+    }
+
+    /** 批次详情：冻结信息 + 排板顺序 + 逐片产出 + 差异 + 更正审计 + 生命周期留痕 */
+    @Data
+    public static class SawBatchView {
+
+        private Long id;
+        private String batchNo;
+        private Long orderId;
+        private String orderNo;
+        private Long blockId;
+        private String blockCode;
+        private String sawType;
+        private String sawTypeName;
+        private String team;
+
+        // 冻结快照
+        private String snapOrderNo;
+        private String snapBlockCode;
+        private Integer snapPlanCount;
+        private Integer planCount;
+        private Integer sizeToleranceCm;
+
+        private String status;
+        private String statusName;
+        private String handedOverBy;
+        private LocalDateTime handedOverAt;
+
+        // 收口固化
+        private Integer closedFinished;
+        private Integer closedRemnant;
+        private Integer closedLoss;
+        private Integer closedVoid;
+        private String closedBy;
+        private LocalDateTime closedAt;
+        private String closedRemark;
+
+        private int openDiffCount;
+        private int resolvedDiffCount;
+        private Integer version;
+        private LocalDateTime createdAt;
+        private LocalDateTime updatedAt;
+
+        // 交接实产（未收口时用于核对；收口后作为固化谱系）
+        private int liveFinished;
+        private int liveRemnant;
+        private int liveLoss;
+        private int liveVoid;
+
+        private List<SawPlanView> plans = new ArrayList<>();
+        private List<SawOutputView> outputs = new ArrayList<>();
+        private List<SawDiffView> diffs = new ArrayList<>();
+        private List<SawChangeView> changes = new ArrayList<>();
+        private List<SawEventView> events = new ArrayList<>();
+    }
+
+    /** 大板反查产出谱系：当前归属 + 历次更正（含跨批改派轨迹） */
+    @Data
+    public static class SlabLineageView {
+
+        private Long slabId;
+        private String slabCode;
+        private Long currentOutputId;
+        private Long currentBatchId;
+        private String currentBatchNo;
+        private String batchStatus;
+        private String batchStatusName;
+        private String outputType;
+        private String outputTypeName;
+        private Integer seqNo;
+        private String status;
+        private String statusName;
+        private LocalDateTime producedAt;
+        private boolean batchClosed;
+        private List<SawChangeView> changes = new ArrayList<>();
     }
 
     // ---------------- 首页总览 ----------------

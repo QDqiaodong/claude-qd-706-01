@@ -97,8 +97,31 @@
             <el-tag size="small" type="danger">{{ slab.qualityHoldStatusName }} · {{ slab.qualityDefectName }}</el-tag>
             <div class="panel-sub">{{ slab.qualityHoldNo }} · 发货冻结中</div>
           </el-descriptions-item>
+          <el-descriptions-item v-if="slab.sawTracked" label="锯切谱系">
+            <el-tag size="small" :type="slab.sawBatchClosed ? 'success' : 'warning'">
+              {{ slab.sawBatchNo }} · {{ slab.sawOutputTypeName }} · {{ slab.sawBatchClosed ? '已收口' : '未收口' }}
+            </el-tag>
+            <div class="panel-sub">产出唯一归属；<el-button link type="primary" @click="loadLineage">历次更正</el-button></div>
+          </el-descriptions-item>
           <el-descriptions-item label="备注">{{ slab.remark || '—' }}</el-descriptions-item>
         </el-descriptions>
+
+        <div v-if="lineage && lineage.changes.length" class="lineage-box">
+          <div class="lineage-title">所属批次与历次更正</div>
+          <div class="panel-sub" style="margin-bottom:6px">
+            当前：{{ lineage.currentBatchNo }} · {{ lineage.outputTypeName }}
+            · {{ lineage.batchStatusName }}
+          </div>
+          <div v-for="c in lineage.changes" :key="c.id" class="lineage-item">
+            <b>{{ c.changeTypeName }}</b>
+            <span v-if="c.fromBatchNo" class="panel-sub">（{{ c.fromBatchNo }} → {{ c.toBatchNo }}）</span>
+            <span class="panel-sub"> · {{ String(c.createdAt).replace('T',' ').slice(0,16) }} · {{ c.operator }}</span>
+            <div class="panel-sub">{{ c.reason }}</div>
+            <div v-if="c.beforeJson" class="json-line">前：{{ c.beforeJson }}</div>
+            <div v-if="c.afterJson" class="json-line">后：{{ c.afterJson }}</div>
+          </div>
+        </div>
+
         <div style="margin-top: 14px">
           <el-button type="warning" @click="gotoQuality">质量处置</el-button>
           <el-button type="primary" @click="gotoSlab">到大板库存页</el-button>
@@ -112,7 +135,7 @@
 import { computed, getCurrentInstance, onMounted, provide, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import router, { navItems } from './router'
-import { millApi, slabApi } from './api'
+import { millApi, slabApi, sawApi } from './api'
 
 /**
  * 模板自带的 main.js 只装了 Element Plus，没装 router（那份文件不动它），
@@ -152,6 +175,7 @@ const treeLoading = ref(false)
 const selectedBlockId = ref(null)
 const slabVisible = ref(false)
 const slab = ref({})
+const lineage = ref(null)
 
 /** 全局上下文：所有页面 inject('mill') */
 const mill = { filters, overview, tree, selectedBlockId, refreshOverview: loadOverview, refreshTree: loadTree }
@@ -202,7 +226,12 @@ async function onNodeClick(data) {
   }
   const detail = await slabApi.detail(data.id)
   slab.value = detail
+  lineage.value = null
   slabVisible.value = true
+}
+
+async function loadLineage() {
+  lineage.value = await sawApi.lineageBySlab(slab.value.id)
 }
 
 function gotoSlab() {
@@ -239,4 +268,15 @@ onMounted(async () => {
   line-height: 9px;
   color: var(--mill-primary);
 }
+
+.lineage-box {
+  margin-top: 14px;
+  padding: 10px;
+  border: 1px dashed var(--mill-border, #dcdfe6);
+  border-radius: 6px;
+}
+.lineage-title { font-weight: 600; margin-bottom: 8px; }
+.lineage-item { padding: 6px 0; border-bottom: 1px dashed #eee; font-size: 13px; }
+.lineage-item:last-child { border-bottom: none; }
+.json-line { font-size: 12px; color: #607d8b; word-break: break-all; }
 </style>

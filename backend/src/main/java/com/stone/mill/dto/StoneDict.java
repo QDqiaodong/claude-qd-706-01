@@ -147,6 +147,53 @@ public final class StoneDict {
             "REWORK", "返工观察",
             "SCRAP", "报废");
 
+    // ---------------- 锯切批次 ----------------
+    private static final Map<String, String> BATCH_STATUS = Map.of(
+            "OPEN", "开锯中",
+            "WAIT_CHECK", "差异待核",
+            "CLOSED", "已收口");
+
+    /** 批次未收口（产出谱系尚未固化、不推进工单完成数） */
+    public static final java.util.List<String> BATCH_ACTIVE_STATUS =
+            java.util.List.of("OPEN", "WAIT_CHECK");
+
+    private static final Map<String, String> OUTPUT_TYPE = Map.of(
+            "FINISHED", "成品",
+            "REMNANT", "可返切余料",
+            "SAW_LOSS", "锯耗");
+
+    private static final Map<String, String> OUTPUT_STATUS = Map.of(
+            "LIVE", "有效",
+            "VOID", "已作废");
+
+    private static final Map<String, String> DIFF_TYPE = Map.of(
+            "MISSING_NO", "缺号",
+            "DUP_NO", "重复号",
+            "SIZE_TOL", "尺寸超差",
+            "COUNT_MISMATCH", "产出数量不符",
+            "SAW_LOSS_UNEXPLAINED", "未解释锯耗");
+
+    private static final Map<String, String> DIFF_STATUS = Map.of(
+            "OPEN", "待核",
+            "RESOLVED", "已核清");
+
+    private static final Map<String, String> DIFF_RESOLUTION = Map.of(
+            "CONFIRM", "确认实际结果",
+            "REASSIGN", "更正归属",
+            "VOID", "作废误登",
+            "FIX", "补录/改尺更正");
+
+    private static final Map<String, String> CHANGE_TYPE = Map.of(
+            "REGISTER", "交接登记",
+            "CONFIRM", "确认实际",
+            "REASSIGN", "跨批改派",
+            "VOID", "作废误登");
+
+    private static final Map<String, String> BATCH_EVENT = Map.of(
+            "CREATE", "开锯建立",
+            "HANDOVER", "交接待核",
+            "CLOSE", "收口固化");
+
     // ---------------- 取值 ----------------
 
     public static boolean isValidStoneType(String v) {
@@ -271,5 +318,59 @@ public final class StoneDict {
 
     public static String reconcileResultName(String v) {
         return v == null ? "" : RECONCILE_RESULT.getOrDefault(v, v);
+    }
+
+    // ---------------- 锯切批次取值 ----------------
+
+    public static boolean isValidBatchStatus(String v) {
+        return v != null && BATCH_STATUS.containsKey(v);
+    }
+
+    public static String batchStatusName(String v) {
+        return v == null ? "" : BATCH_STATUS.getOrDefault(v, v);
+    }
+
+    public static boolean isBatchActive(String v) {
+        return v != null && BATCH_ACTIVE_STATUS.contains(v);
+    }
+
+    public static boolean isValidOutputType(String v) {
+        return v != null && OUTPUT_TYPE.containsKey(v);
+    }
+
+    public static String outputTypeName(String v) {
+        return v == null ? "" : OUTPUT_TYPE.getOrDefault(v, v);
+    }
+
+    public static String outputStatusName(String v) {
+        return v == null ? "" : OUTPUT_STATUS.getOrDefault(v, v);
+    }
+
+    public static boolean isValidDiffType(String v) {
+        return v != null && DIFF_TYPE.containsKey(v);
+    }
+
+    public static String diffTypeName(String v) {
+        return v == null ? "" : DIFF_TYPE.getOrDefault(v, v);
+    }
+
+    public static String diffStatusName(String v) {
+        return v == null ? "" : DIFF_STATUS.getOrDefault(v, v);
+    }
+
+    public static boolean isValidDiffResolution(String v) {
+        return v != null && DIFF_RESOLUTION.containsKey(v);
+    }
+
+    public static String diffResolutionName(String v) {
+        return v == null ? "" : DIFF_RESOLUTION.getOrDefault(v, v);
+    }
+
+    public static String changeTypeName(String v) {
+        return v == null ? "" : CHANGE_TYPE.getOrDefault(v, v);
+    }
+
+    public static String batchEventName(String v) {
+        return v == null ? "" : BATCH_EVENT.getOrDefault(v, v);
     }
 }

@@ -83,8 +83,28 @@
           <el-tag size="small" type="danger">{{ actRow.qualityHoldStatusName }} · {{ actRow.qualityDefectName }}</el-tag>
           <div class="panel-sub">{{ actRow.qualityHoldNo }} · 隔离/待复检期间不能预定或出库</div>
         </el-descriptions-item>
+        <el-descriptions-item v-if="actRow.sawTracked" label="锯切谱系">
+          <el-tag size="small" :type="actRow.sawBatchClosed ? 'success' : 'warning'">
+            {{ actRow.sawBatchNo }} · {{ actRow.sawOutputTypeName }} · {{ actRow.sawBatchClosed ? '已收口固化' : '批次未收口' }}
+          </el-tag>
+          <div class="panel-sub">逐片产出唯一归属；<el-button link type="primary" @click="loadLineage(actRow)">查看历次更正</el-button></div>
+        </el-descriptions-item>
         <el-descriptions-item label="备注">{{ actRow.remark || '—' }}</el-descriptions-item>
       </el-descriptions>
+
+      <div v-if="lineage && lineage.changes.length" class="lineage-box">
+        <div class="lineage-title">批次归属与历次更正</div>
+        <el-timeline>
+          <el-timeline-item v-for="c in lineage.changes" :key="c.id"
+                            :timestamp="fmt(c.createdAt) + ' · ' + (c.operator || '')" placement="top" size="normal">
+            <el-tag size="small">{{ c.changeTypeName }}</el-tag>
+            <span v-if="c.fromBatchNo" class="panel-sub" style="margin-left:6px">{{ c.fromBatchNo }} → {{ c.toBatchNo }}</span>
+            <div class="panel-sub">{{ c.reason }}</div>
+            <div v-if="c.beforeJson" class="json-line">前：{{ c.beforeJson }}</div>
+            <div v-if="c.afterJson" class="json-line">后：{{ c.afterJson }}</div>
+          </el-timeline-item>
+        </el-timeline>
+      </div>
       <div style="margin-top: 14px; display: flex; gap: 8px">
         <el-button type="warning" @click="gotoQuality">质量处置</el-button>
         <el-button type="primary" @click="openStatus(actRow)">状态变更</el-button>
@@ -153,7 +173,7 @@
 import { inject, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { blockApi, slabApi } from '../api'
+import { blockApi, slabApi, sawApi } from '../api'
 
 const mill = inject('mill')
 const nav = useRouter()
@@ -172,6 +192,7 @@ const detailVisible = ref(false)
 const createVisible = ref(false)
 const statusVisible = ref(false)
 const actRow = ref({})
+const lineage = ref(null)
 const nextStatus = ref('INSTOCK')
 const form = ref({
   slabCode: '', blockId: null, lengthCm: 160, widthCm: 100, thicknessCm: 2.0,
@@ -244,12 +265,21 @@ async function doCreate() {
 
 async function openDetail(row) {
   actRow.value = row
+  lineage.value = null
   detailVisible.value = true
   try {
     actRow.value = await slabApi.detail(row.id)
   } catch (e) {
     // 列表行已足够展示，详情刷新失败不挡抽屉
   }
+}
+
+async function loadLineage(row) {
+  lineage.value = await sawApi.lineageBySlab(row.id)
+}
+
+function fmt(t) {
+  return t ? String(t).replace('T', ' ').slice(0, 19) : ''
 }
 
 function gotoQuality() {
@@ -289,4 +319,12 @@ onMounted(async () => {
   border-radius: 4px;
   line-height: 1.6;
 }
+.lineage-box {
+  margin-top: 14px;
+  padding: 10px;
+  border: 1px dashed var(--mill-border, #dcdfe6);
+  border-radius: 6px;
+}
+.lineage-title { font-weight: 600; margin-bottom: 8px; }
+.json-line { font-size: 12px; color: #607d8b; word-break: break-all; }
 </style>

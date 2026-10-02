@@ -33,6 +33,22 @@
       <el-table-column label="板数（已完成/计划）" width="150">
         <template #default="{ row }">
           <b>{{ row.doneCount }}</b> / {{ row.planCount }}
+          <el-tooltip v-if="row.batchManaged" content="完成数由已收口批次的合格实产推进，未核差异不计数" placement="top">
+            <el-tag size="small" type="success" effect="plain" style="margin-left:4px">批次实产</el-tag>
+          </el-tooltip>
+          <el-tooltip v-else content="该工单尚无锯切批次记录，可按旧方式登记；请补做逐片交接" placement="top">
+            <el-tag size="small" type="warning" effect="plain" style="margin-left:4px">待补交接</el-tag>
+          </el-tooltip>
+        </template>
+      </el-table-column>
+      <el-table-column label="批次谱系" width="150">
+        <template #default="{ row }">
+          <template v-if="row.batchManaged">
+            <el-button link type="primary" @click="openBatches(row)">{{ row.batchCount }} 个批次</el-button>
+            <el-tag v-if="row.openDiffCount > 0" size="small" type="danger">{{ row.openDiffCount }} 差异</el-tag>
+            <el-tag v-else size="small" type="success">已核 {{ row.closedBatchCount }}</el-tag>
+          </template>
+          <span v-else class="panel-sub">无批次（旧工单）</span>
         </template>
       </el-table-column>
       <el-table-column label="进度" min-width="200">
@@ -51,13 +67,16 @@
           <el-tag size="small" :type="tagType(row.status)">{{ row.statusName }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="230" fixed="right">
+      <el-table-column label="操作" width="260" fixed="right">
         <template #default="{ row }">
-          <el-button link type="primary" @click="doStart(row)" v-if="row.status === 'PENDING'">开工</el-button>
-          <el-button link type="success" @click="doProgress(row)"
-                     v-if="row.status === 'PENDING' || row.status === 'PROCESSING'">完成+1</el-button>
-          <el-button link type="warning" @click="doFinish(row)"
-                     v-if="row.status === 'PENDING' || row.status === 'PROCESSING'">完工</el-button>
+          <template v-if="!row.batchManaged">
+            <el-button link type="primary" @click="doStart(row)" v-if="row.status === 'PENDING'">开工</el-button>
+            <el-button link type="success" @click="doProgress(row)"
+                       v-if="row.status === 'PENDING' || row.status === 'PROCESSING'">完成+1</el-button>
+            <el-button link type="warning" @click="doFinish(row)"
+                       v-if="row.status === 'PENDING' || row.status === 'PROCESSING'">完工</el-button>
+          </template>
+          <el-button v-else link type="primary" @click="openBatches(row)">批次交接</el-button>
           <el-button link @click="doSettle(row)" v-if="row.status === 'DONE'">结算</el-button>
         </template>
       </el-table-column>
@@ -105,13 +124,100 @@
       <el-button type="primary" @click="doCreate">创建</el-button>
     </template>
   </el-dialog>
+
+  <!-- 工单的批次谱系：各批次 / 待核差异 / 逐片来源 -->
+  <el-drawer v-model="batchDrawerVisible" size="70%"
+             :title="batchOrder.id ? '工单 ' + batchOrder.orderNo + ' · 批次谱系' : '批次谱系'">
+    <div v-if="batchOrder.id">
+      <el-alert
+        :title="batchOrder.batchManaged
+          ? `已按锯切批次交接：${batchOrder.batchCount} 个批次，已收口 ${batchOrder.closedBatchCount} 个，固化合格实产 ${batchOrder.closedFinishedTotal} 片；待核差异 ${batchOrder.openDiffCount} 条，核清前不计完成数。`
+          : '该工单尚无任何锯切批次记录（旧工单），仍可按原方式查看与手工登记；建议补做逐片交接后再收口。'"
+        :type="batchOrder.openDiffCount > 0 ? 'warning' : (batchOrder.batchManaged ? 'success' : 'info')"
+        :closable="false" show-icon style="margin-bottom: 12px" />
+
+      <div v-if="!orderBatches.length" class="panel-sub">该工单暂无批次，可到「锯切批次」页开锯建批。</div>
+
+      <el-collapse v-model="activeBatchIds" v-for="b in orderBatches" :key="b.id" style="margin-bottom: 10px">
+        <el-collapse-item :name="b.id">
+          <template #title>
+            <span style="margin-right: 10px"><b>{{ b.batchNo }}</b></span>
+            <el-tag size="small" :type="batchTagType(b.status)" style="margin-right: 8px">{{ b.statusName }}</el-tag>
+            <span class="panel-sub" style="margin-right: 12px">
+              冻结 {{ b.planCount }} 顺序 · LIVE 成品 {{ b.liveFinished }}/余料 {{ b.liveRemnant }}/锯耗 {{ b.liveLoss }}
+            </span>
+            <el-tag v-if="b.openDiffCount > 0" size="small" type="danger">{{ b.openDiffCount }} 待核</el-tag>
+            <el-tag v-if="b.status === 'CLOSED'" size="small" type="success">固化成品 {{ b.closedFinished }}</el-tag>
+          </template>
+
+          <div class="panel-sub" style="margin: 4px 0 6px">
+            荒料 {{ b.blockCode }} · {{ b.sawTypeName }} · {{ b.team }} · 开锯 {{ b.createdAt?.slice(0, 16) }}
+          </div>
+
+          <el-table :data="batchOutputs(b)" border size="small">
+            <el-table-column label="顺序" width="70">
+              <template #default="{ row: o }">{{ o.seqNo == null ? '计划外' : o.seqNo }}</template>
+            </el-table-column>
+            <el-table-column prop="slabCode" label="大板编号" width="130" />
+            <el-table-column label="类型" width="90">
+              <template #default="{ row: o }">
+                <el-tag size="small" :type="o.outputType === 'FINISHED' ? 'success' : (o.outputType === 'REMNANT' ? 'warning' : 'info')">
+                  {{ o.outputTypeName }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="实际尺寸" width="120">
+              <template #default="{ row: o }">
+                {{ o.actualLengthCm ? o.actualLengthCm + '×' + o.actualWidthCm + 'cm' : '—' }}
+                <el-tag v-if="o.sizeOutOfTolerance" size="small" type="danger">超差</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="operator" label="操作人" width="90" />
+            <el-table-column label="时间" width="150">
+              <template #default="{ row: o }">{{ (o.producedAt || '').slice(0, 19).replace('T', ' ') }}</template>
+            </el-table-column>
+            <el-table-column label="状态 / 备注" min-width="140">
+              <template #default="{ row: o }">
+                <el-tag v-if="o.status === 'VOID'" size="small" type="danger">已作废</el-tag>
+                <span v-else>{{ o.note || '有效' }}</span>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div v-if="b.diffs?.length" style="margin-top: 8px">
+            <div class="panel-sub">计划 vs 实产差异：</div>
+            <el-table :data="b.diffs" border size="small" style="margin-top: 4px">
+              <el-table-column label="类型" width="110">
+                <template #default="{ row: d }">
+                  <el-tag size="small" :type="d.status === 'OPEN' ? 'danger' : 'info'">{{ d.diffTypeName }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="detail" label="描述" min-width="300" />
+              <el-table-column label="核清" width="220">
+                <template #default="{ row: d }">
+                  <span v-if="d.status === 'OPEN'" class="text-danger">待负责人核清（阻断收口）</span>
+                  <span v-else class="panel-sub">{{ d.resolutionName }}：{{ d.resolveReason }}</span>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+
+          <div style="margin-top: 8px">
+            <el-button size="small" type="primary" @click="goBatchWorkbench(b)">到批次工作台处理</el-button>
+          </div>
+        </el-collapse-item>
+      </el-collapse>
+    </div>
+  </el-drawer>
 </template>
 
 <script setup>
 import { computed, inject, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { blockApi, orderApi } from '../api'
+import { blockApi, orderApi, sawApi } from '../api'
 
+const router = useRouter()
 const mill = inject('mill')
 
 const rows = ref([])
@@ -199,6 +305,37 @@ async function doSettle(row) {
   load()
 }
 
+// ---------------- 模块八：批次谱系抽屉 ----------------
+const batchDrawerVisible = ref(false)
+const batchOrder = ref({})
+const orderBatches = ref([])
+const activeBatchIds = ref([])
+
+function batchTagType(s) {
+  return { OPEN: 'info', WAIT_CHECK: 'danger', CLOSED: 'success' }[s] || 'info'
+}
+
+async function openBatches(row) {
+  batchOrder.value = row
+  orderBatches.value = await sawApi.byOrder(row.id)
+  activeBatchIds.value = orderBatches.value
+    .filter(b => b.status !== 'CLOSED' || b.openDiffCount > 0).map(b => b.id)
+  batchDrawerVisible.value = true
+}
+
+function batchOutputs(b) {
+  return [...(b.outputs || [])].sort((a, z) => {
+    const sa = a.seqNo == null ? 999999 : a.seqNo
+    const sz = z.seqNo == null ? 999999 : z.seqNo
+    return sa - sz || a.id - z.id
+  })
+}
+
+function goBatchWorkbench(b) {
+  batchDrawerVisible.value = false
+  router.push({ path: '/saw', query: { batchId: b.id } })
+}
+
 watch(() => mill.selectedBlockId.value, load)
 
 onMounted(async () => {
@@ -206,3 +343,7 @@ onMounted(async () => {
   await load()
 })
 </script>
+
+<style scoped>
+.text-danger { color: #e53935; }
+</style>

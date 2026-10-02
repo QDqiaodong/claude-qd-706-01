@@ -99,3 +99,19 @@ export const qualityApi = {
   recheck: (id, data) => http.post(`/quality-holds/${id}/recheck`, data),
   scrap: (id, data) => http.post(`/quality-holds/${id}/scrap`, data)
 }
+
+/** 模块八：锯切批次交接与产出谱系 */
+export const sawApi = {
+  page: (params) => http.get('/saw-batches', { params }),
+  detail: (id) => http.get(`/saw-batches/${id}`),
+  byOrder: (orderId) => http.get(`/saw-batches/by-order/${orderId}`),
+  lineageBySlab: (slabId) => http.get('/saw-batches/lineage-by-slab', { params: { slabId } }),
+  create: (data) => http.post('/saw-batches', data),
+  registerOutput: (id, data) => http.post(`/saw-batches/${id}/outputs`, data),
+  handover: (id, data) => http.post(`/saw-batches/${id}/handover`, data),
+  resolveDiff: (diffId, data) => http.post(`/saw-batches/diffs/${diffId}/resolve`, data),
+  correctOutput: (outputId, data) => http.post(`/saw-batches/outputs/${outputId}/correct`, data),
+  reassignOutput: (outputId, data) => http.post(`/saw-batches/outputs/${outputId}/reassign`, data),
+  voidOutput: (outputId, data) => http.post(`/saw-batches/outputs/${outputId}/void`, data),
+  close: (id, data) => http.post(`/saw-batches/${id}/close`, data)
+}

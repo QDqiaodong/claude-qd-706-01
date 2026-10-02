@@ -10,6 +10,13 @@
 --   5. mill_delivery / mill_delivery_item 出库发货（客户 / 车牌 / 大板明细 / 金额 / 状态）
 --   6. mill_quality_hold 大板质量隔离记录（缺陷 / 严重度 / 基础资料快照 / 受控流转状态）
 --   7. mill_quality_event 质量隔离留痕（建立 / 送复检 / 历次复检意见 / 放行 / 报废，只追加）
+--   8. 锯切批次交接与产出谱系（六张表）：
+--      mill_saw_batch 锯切批次（冻结荒料/工单/锯切方式/排板顺序，OPEN 开锯 → WAIT_CHECK 已交接差异待核 → CLOSED 已收口）
+--      mill_saw_plan  开锯时冻结的排板顺序（顺序号 + 计划尺寸，建立后不可变）
+--      mill_saw_output 逐片产出（大板编号 / 实际尺寸 / 对应顺序 / 成品 FINISHED / 可返切余料 REMNANT / 锯耗 SAW_LOSS）
+--      mill_saw_diff  差异待核（缺号 / 重复号 / 尺寸超差 / 数量不符 / 未解释锯耗；OPEN 阻断收口）
+--      mill_saw_change 逐片归属更正审计（登记 / 确认实际 / 跨批改派 / 作废，保留前后值与原因，只追加）
+--      mill_saw_event 批次生命周期留痕（建立 / 交接 / 收口，只追加）
 --
 -- 质量隔离口径：
 --   * 同一块大板同一时刻只允许一条未收口（隔离中 / 待复检）记录，由部分唯一索引
@@ -18,6 +25,16 @@
 --   * 复检结论只往 mill_quality_event 追加，不覆盖最初缺陷与历次意见；
 --   * 隔离中 / 待复检即对发货派生冻结：大板不能再选入发货单，已在待装车单中的明细挂起禁运；
 --     放行由活跃记录消失自动解除挂起，报废则从待装车单移除明细并重算总金额。
+--
+-- 批次谱系口径：
+--   * 开锯即冻结：批次复制当时的工单号 / 荒料编号 / 锯切方式 / 班组 / 排板顺序与计划尺寸，后续基础资料变化不改写；
+--   * 逐片产出全局唯一归属：mill_saw_output.live_slab_id 为生成列（未作废且有大板时 = slab_id），
+--     唯一索引在数据库层保证「同一块大板的有效产出只能属于一个批次」，跨批次扫码先到先得、后到方收到 409 与当前归属；
+--   * 断网重试 / 重复扫码幂等：client_token 全局唯一，同 token 同内容重复提交返回首次结果，绝不生成两份产出；
+--   * 交接先放行班组：产出照实登记，差异进入 mill_saw_diff 待核而不是丢弃；未核清差异前批次不能收口、
+--     工单完成数不提前增加；收口单事务固化谱系并按合格实产（未作废 FINISHED 片数）推进工单，
+--     行锁 + 乐观锁保证两人同时收口 / 重复点击 / 中途失败只有一个有效结果；
+--   * 已被后续批次以返切来源引用的产出不得作废（谱系链不可断）。
 --
 -- 派生口径：体积 = 长×宽×高/1e6；重量 = 体积×石种密度（大理石 2.7 / 花岗岩 2.8 /
 -- 玉石 2.9 / 石英石 2.6 / 洞石 2.5）；面积 = 长×宽/1e4；明细金额 = 数量×面积×单价；
@@ -29,6 +46,12 @@ SET FOREIGN_KEY_CHECKS = 0;
 
 DROP TABLE IF EXISTS mill_quality_event;
 DROP TABLE IF EXISTS mill_quality_hold;
+DROP TABLE IF EXISTS mill_saw_event;
+DROP TABLE IF EXISTS mill_saw_change;
+DROP TABLE IF EXISTS mill_saw_diff;
+DROP TABLE IF EXISTS mill_saw_output;
+DROP TABLE IF EXISTS mill_saw_plan;
+DROP TABLE IF EXISTS mill_saw_batch;
 DROP TABLE IF EXISTS mill_seq;
 DROP TABLE IF EXISTS mill_delivery_item;
 DROP TABLE IF EXISTS mill_delivery;
@@ -204,10 +227,160 @@ CREATE TABLE mill_quality_event (
 
 -- 业务单据号原子序列（按 seq_key 行锁取号，杜绝并发同号）
 CREATE TABLE mill_seq (
-    seq_key   VARCHAR(40)  NOT NULL COMMENT '序列键，如 QH-2026',
+    seq_key   VARCHAR(40)  NOT NULL COMMENT '序列键，如 QH-2026 / SB-2026',
     seq_value BIGINT       NOT NULL DEFAULT 0 COMMENT '当前已分配序号',
     PRIMARY KEY (seq_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='单据号序列';
+
+-- ============================================================================
+-- 模块八：锯切批次交接与产出谱系
+-- ============================================================================
+
+-- 8.1 锯切批次：班组开锯时建立，冻结当时的荒料 / 工单 / 锯切方式 / 班组 / 排板顺序。
+--     OPEN 开锯登记中 → WAIT_CHECK 已交接、差异待核 → CLOSED 差异核清后收口（谱系固化）。
+CREATE TABLE mill_saw_batch (
+    id                  BIGINT       NOT NULL AUTO_INCREMENT,
+    batch_no            VARCHAR(30)  NOT NULL COMMENT '锯切批次号，如 SB-2026-0001',
+    order_id            BIGINT       NOT NULL COMMENT '加工工单',
+    block_id            BIGINT       NOT NULL COMMENT '锯切荒料',
+    saw_type            VARCHAR(20)  NOT NULL COMMENT '锯切方式（快照）：FRAME / DISC / WIRE / COMBO',
+    team                VARCHAR(20)           COMMENT '开锯班组（快照）',
+    -- 冻结快照：开锯瞬间的工单 / 荒料 / 计划口径，后续基础资料变化不改写
+    snap_order_no       VARCHAR(30)  NOT NULL COMMENT '工单号快照',
+    snap_block_code     VARCHAR(30)  NOT NULL COMMENT '荒料编号快照',
+    snap_plan_count     INT          NOT NULL COMMENT '工单计划板数快照',
+    plan_count          INT          NOT NULL DEFAULT 0 COMMENT '本批冻结排板顺序条数',
+    size_tolerance_cm   INT          NOT NULL DEFAULT 2 COMMENT '尺寸超差阈值（cm），实际长宽与计划任一超出即差异',
+    status              VARCHAR(20)  NOT NULL COMMENT 'OPEN 开锯中 / WAIT_CHECK 已交接差异待核 / CLOSED 已收口',
+    handed_over_by      VARCHAR(30)           COMMENT '交接操作人',
+    handed_over_at      DATETIME              COMMENT '交接时间',
+    -- 收口时一次性固化的产出谱系计数（未收口前不参与工单完成数）
+    closed_finished     INT                   COMMENT '收口固化：合格成品片数（未作废 FINISHED）',
+    closed_remnant      INT                   COMMENT '收口固化：可返切余料片数',
+    closed_loss         INT                   COMMENT '收口固化：锯耗片数',
+    closed_void         INT                   COMMENT '收口固化：作废片数',
+    closed_by           VARCHAR(30)           COMMENT '收口操作人',
+    closed_at           DATETIME              COMMENT '收口时间',
+    closed_remark       VARCHAR(500)          COMMENT '收口备注',
+    open_diff_count     INT          NOT NULL DEFAULT 0 COMMENT '未核清差异条数（0 才允许收口）',
+    version             INT          NOT NULL DEFAULT 0 COMMENT '乐观锁版本（两人同时收口 / 重复点击只有一个生效）',
+    created_at          DATETIME     NOT NULL COMMENT '开锯建立时间',
+    updated_at          DATETIME     NOT NULL COMMENT '最近变更时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_batch_no (batch_no),
+    KEY idx_batch_order (order_id),
+    KEY idx_batch_block (block_id),
+    KEY idx_batch_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='锯切批次（交接与产出谱系主表）';
+
+-- 8.2 批次排板顺序冻结：开锯时从排板方案复制（顺序号 + 计划长宽），建立后不可变。
+--     计划无对应产出 = 缺号；实际尺寸对照它判超差；一个顺序出现两片产出 = 重复号。
+CREATE TABLE mill_saw_plan (
+    id              BIGINT      NOT NULL AUTO_INCREMENT,
+    batch_id        BIGINT      NOT NULL COMMENT '锯切批次',
+    seq_no          INT         NOT NULL COMMENT '锯切顺序号（批次内冻结）',
+    plan_length_cm  INT         NOT NULL COMMENT '计划长（cm，排板快照）',
+    plan_width_cm   INT         NOT NULL COMMENT '计划宽（cm，排板快照）',
+    layout_item_id  BIGINT               COMMENT '来源排板方案 id（可空，允许计划外批次）',
+    slab_code       VARCHAR(30)           COMMENT '排板预占大板编号（可空）',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_plan_batch_seq (batch_id, seq_no),
+    KEY idx_plan_batch (batch_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='批次冻结的锯切排板顺序';
+
+-- 8.3 逐片产出登记：交接时逐片扫码登记大板编号 / 实际尺寸 / 对应顺序 / 产出类型 / 操作人 / 时间。
+--     幂等：client_token 唯一——现场断网重试 / 重复扫码拿到同一结果，绝不生成两份产出。
+--     唯一归属：live_slab_id 生成列（未作废且有大板时 = slab_id）全局唯一——
+--     同一块大板的有效产出只能属于一个批次，跨批次占用先到先得，后到方收 409 与当前归属。
+CREATE TABLE mill_saw_output (
+    id              BIGINT       NOT NULL AUTO_INCREMENT,
+    batch_id        BIGINT       NOT NULL COMMENT '所属锯切批次',
+    client_token    VARCHAR(60)  NOT NULL COMMENT '现场扫码幂等令牌（设备+流水），断网重试同 token 只产生一片',
+    slab_id         BIGINT                COMMENT '产出大板 id（FINISHED / REMNANT 创建或关联；SAW_LOSS 为空）',
+    slab_code       VARCHAR(30)           COMMENT '大板编号（锯耗可空）',
+    output_type     VARCHAR(15)  NOT NULL COMMENT 'FINISHED 成品 / REMNANT 可返切余料 / SAW_LOSS 锯耗',
+    seq_no          INT                   COMMENT '对应排板顺序号（计划外产出可空）',
+    actual_length_cm INT                  COMMENT '实际长（cm）',
+    actual_width_cm INT                   COMMENT '实际宽（cm）',
+    thickness_cm    DECIMAL(5,1)          COMMENT '厚度（cm）',
+    source_slab_id  BIGINT                COMMENT '返切来源大板 / 余料 id（本批是对哪片料再切）',
+    source_output_id BIGINT               COMMENT '返切来源产出 id（被后续批次引用的产出不得作废）',
+    operator        VARCHAR(30)           COMMENT '登记操作人',
+    produced_at     DATETIME              COMMENT '锯切产出时间',
+    note            VARCHAR(300)          COMMENT '现场备注（锯耗必填损耗原因，留空即判「未解释锯耗」差异）',
+    status          VARCHAR(15)  NOT NULL DEFAULT 'LIVE' COMMENT 'LIVE 有效 / VOID 已作废（作废只置位不物理删除）',
+    void_reason     VARCHAR(500)          COMMENT '作废原因',
+    void_by         VARCHAR(30)           COMMENT '作废操作人',
+    void_at         DATETIME              COMMENT '作废时间',
+    created_at      DATETIME     NOT NULL COMMENT '登记时间',
+    -- 生成列：未作废且挂着大板的产出才占归属；作废后让出（可重新登记到正确批次）。
+    live_slab_id    BIGINT GENERATED ALWAYS AS (CASE WHEN status = 'LIVE' AND slab_id IS NOT NULL THEN slab_id ELSE NULL END) VIRTUAL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_output_token (client_token),
+    UNIQUE KEY uk_output_live_slab (live_slab_id),
+    KEY idx_output_batch (batch_id),
+    KEY idx_output_seq (batch_id, seq_no),
+    KEY idx_output_source (source_output_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='锯切批次逐片产出登记';
+
+-- 8.4 差异待核：交接时由计划 vs 实产自动识别，不丢弃现场记录；负责人逐项核清后才能收口。
+--     MISSING_NO 缺号 / DUP_NO 重复号 / SIZE_TOL 尺寸超差 / COUNT_MISMATCH 数量不符 / SAW_LOSS_UNEXPLAINED 未解释锯耗。
+CREATE TABLE mill_saw_diff (
+    id              BIGINT       NOT NULL AUTO_INCREMENT,
+    batch_id        BIGINT       NOT NULL COMMENT '所属锯切批次',
+    diff_type       VARCHAR(25)  NOT NULL COMMENT 'MISSING_NO 缺号 / DUP_NO 重复号 / SIZE_TOL 尺寸超差 / COUNT_MISMATCH 数量不符 / SAW_LOSS_UNEXPLAINED 未解释锯耗',
+    seq_no          INT                   COMMENT '涉及顺序号（数量 / 锯耗汇总类可空）',
+    slab_id         BIGINT                COMMENT '涉及大板 id',
+    slab_code       VARCHAR(30)           COMMENT '涉及大板编号',
+    detail          VARCHAR(500) NOT NULL COMMENT '差异描述（计划值 / 实测值 / 偏差，自动生成）',
+    status          VARCHAR(15)  NOT NULL DEFAULT 'OPEN' COMMENT 'OPEN 待核 / RESOLVED 已核清（核清后重算不复活）',
+    resolution      VARCHAR(20)           COMMENT '核清方式：CONFIRM 确认实际结果 / REASSIGN 更正归属 / VOID 作废误登 / FIX 补录或改尺',
+    resolve_reason  VARCHAR(500)          COMMENT '核清原因（必填）',
+    resolved_by     VARCHAR(30)           COMMENT '核清操作人',
+    resolved_at     DATETIME              COMMENT '核清时间',
+    created_at      DATETIME     NOT NULL COMMENT '差异产生时间',
+    -- 生成列：未核清差异的去重键（批次+类型+顺序+大板），核清后置 NULL，既防重复挂差异又允许保留已核历史
+    open_key        VARCHAR(120) GENERATED ALWAYS AS (
+        CASE WHEN status = 'OPEN'
+             THEN CONCAT(batch_id, '|', diff_type, '|', IFNULL(seq_no, ''), '|', IFNULL(slab_id, ''))
+             ELSE NULL END) VIRTUAL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_diff_open (open_key),
+    KEY idx_diff_batch (batch_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='锯切批次差异待核';
+
+-- 8.5 逐片产出更正审计（只追加）：登记 / 确认实际 / 跨批改派 / 作废，保留变更前后内容与原因。
+CREATE TABLE mill_saw_change (
+    id              BIGINT       NOT NULL AUTO_INCREMENT,
+    batch_id        BIGINT       NOT NULL COMMENT '变更发生时所在批次',
+    output_id       BIGINT       NOT NULL COMMENT '涉及产出',
+    change_type     VARCHAR(20)  NOT NULL COMMENT 'REGISTER 登记 / CONFIRM 确认实际 / REASSIGN 跨批改派 / VOID 作废误登',
+    from_batch_id   BIGINT                COMMENT '变更前归属批次（改派时）',
+    to_batch_id     BIGINT                COMMENT '变更后归属批次（改派时）',
+    before_json     VARCHAR(2000)         COMMENT '变更前产出快照（JSON）',
+    after_json      VARCHAR(2000)         COMMENT '变更后产出快照（JSON）',
+    reason          VARCHAR(500)          COMMENT '变更原因（核清 / 改派 / 作废必填）',
+    operator        VARCHAR(30)           COMMENT '操作人',
+    created_at      DATETIME     NOT NULL COMMENT '变更时间',
+    PRIMARY KEY (id),
+    KEY idx_change_batch (batch_id),
+    KEY idx_change_output (output_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='锯切产出归属更正审计（只追加）';
+
+-- 8.6 批次生命周期留痕（只追加）：开锯建立 / 交接待核 / 收口固化。
+CREATE TABLE mill_saw_event (
+    id          BIGINT       NOT NULL AUTO_INCREMENT,
+    batch_id    BIGINT       NOT NULL COMMENT '锯切批次',
+    event_type  VARCHAR(20)  NOT NULL COMMENT 'CREATE 开锯建立 / HANDOVER 交接待核 / CLOSE 收口固化',
+    from_status VARCHAR(20)           COMMENT '变更前状态',
+    to_status   VARCHAR(20)           COMMENT '变更后状态',
+    content     VARCHAR(500)          COMMENT '现场说明 / 交接意见 / 收口结论',
+    operator    VARCHAR(30)           COMMENT '操作人',
+    created_at  DATETIME     NOT NULL COMMENT '发生时间',
+    PRIMARY KEY (id),
+    KEY idx_event_batch (batch_id),
+    KEY idx_event_time (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='锯切批次生命周期留痕（只追加）';
 
 -- ---------------------------- 荒料 ----------------------------
 INSERT INTO mill_block (id, block_code, quarry, stone_type, length_cm, width_cm, height_cm,
@@ -222,7 +395,7 @@ INSERT INTO mill_block (id, block_code, quarry, stone_type, length_cm, width_cm,
     (8, 'BLK-2026-008', '广东云浮思劳矿区', 'QUARTZ', 290, 160, 145, 6.73, 17.50, '2026-07-18', 2350, '云浮科迪石英石有限公司', 'PROCESSING', '边角有缺角，先修边'),
     (9, 'BLK-2026-009', '意大利卡拉拉（进口）', 'TRAVERTINE', 270, 160, 140, 6.05, 15.13, '2026-07-25', 6800, '厦门海石进出口有限公司', 'PENDING', '进口洞石，孔洞偏大'),
     (10, 'BLK-2026-010', '意大利卡拉拉（进口）', 'TRAVERTINE', 265, 155, 135, 5.55, 13.88, '2026-08-01', 7100, '厦门海石进出口有限公司', 'PENDING', '进口洞石，需补胶'),
-    (11, 'BLK-2026-011', '福建南安水头矿口', 'MARBLE', 370, 225, 175, 14.57, 39.34, '2026-08-08', 3980, '南安鑫磊矿业有限公司', 'PENDING', '超大料，待框架锯排期'),
+    (11, 'BLK-2026-011', '福建南安水头矿口', 'MARBLE', 370, 225, 175, 14.57, 39.34, '2026-08-08', 3980, '南安鑫磊矿业有限公司', 'PROCESSING', '超大料，两班倒分两批锯切'),
     (12, 'BLK-2026-012', '山东五莲街头矿区', 'GRANITE', 310, 195, 155, 9.37, 26.24, '2026-08-15', 3120, '五莲石材集团股份有限公司', 'PENDING', '五莲红，色差控制严格');
 
 -- ---------------------------- 大板 ----------------------------
@@ -261,7 +434,21 @@ INSERT INTO mill_slab (id, slab_code, block_id, length_cm, width_cm, thickness_c
     (31, 'SLB-0031', 8, 140, 80, 2.0, 1.12, 'POLISHED', 'A', 'D-02-01', 'OUTBOUND', ''),
     (32, 'SLB-0032', 8, 135, 80, 2.0, 1.08, 'POLISHED', 'B', 'D-02-02', 'OUTBOUND', ''),
     (33, 'SLB-0033', 8, 130, 75, 2.0, 0.98, 'LEATHER', 'C', 'D-02-03', 'RESERVED', ''),
-    (34, 'SLB-0034', 8, 125, 75, 2.0, 0.94, 'LEATHER', 'B', 'D-02-04', 'RESERVED', '');
+    (34, 'SLB-0034', 8, 125, 75, 2.0, 0.94, 'LEATHER', 'B', 'D-02-04', 'RESERVED', ''),
+    -- -- 模块八验收种子：荒料 011 两批锯切产出（SB-2026-0001 已收口 4 片 / 0002 待核 3 片，含 1 片余料）
+    (35, 'SLB-0101', 11, 90, 105, 2.0, 0.95, 'POLISHED', 'A', 'F-11-01', 'INSTOCK', 'SB-2026-0001 顺序1'),
+    (36, 'SLB-0102', 11, 90, 105, 2.0, 0.95, 'POLISHED', 'A', 'F-11-02', 'INSTOCK', 'SB-2026-0001 顺序2'),
+    (37, 'SLB-0103', 11, 90, 105, 2.0, 0.95, 'POLISHED', 'B', 'F-11-03', 'INSTOCK', 'SB-2026-0001 顺序3'),
+    (38, 'SLB-0104', 11, 90, 105, 2.0, 0.95, 'POLISHED', 'A', 'F-11-04', 'INSTOCK', 'SB-2026-0001 顺序4'),
+    (39, 'SLB-0105', 11, 90, 105, 2.0, 0.95, 'POLISHED', 'A', 'F-11-05', 'INSTOCK', 'SB-2026-0002 顺序5'),
+    (40, 'SLB-0106', 11, 85, 105, 2.0, 0.89, 'POLISHED', 'B', 'F-11-06', 'INSTOCK', 'SB-2026-0002 顺序6，实测长 85 超差 5cm'),
+    (41, 'SLB-0107', 11, 60, 80, 2.0, 0.48, 'HONED', 'C', 'F-11-07', 'INSTOCK', 'SB-2026-0002 顺序8 可返切余料'),
+    -- -- 模块八验收种子：荒料 012 首批 5 片计划吻合（SB-2026-0003 已交接零差异，待收口并发演示）
+    (42, 'SLB-0201', 12, 180, 61, 2.0, 1.10, 'FLAMED', 'A', 'F-12-01', 'INSTOCK', 'SB-2026-0003 顺序1'),
+    (43, 'SLB-0202', 12, 180, 61, 2.0, 1.10, 'FLAMED', 'A', 'F-12-02', 'INSTOCK', 'SB-2026-0003 顺序2'),
+    (44, 'SLB-0203', 12, 180, 61, 2.0, 1.10, 'FLAMED', 'A', 'F-12-03', 'INSTOCK', 'SB-2026-0003 顺序3'),
+    (45, 'SLB-0204', 12, 180, 61, 2.0, 1.10, 'FLAMED', 'A', 'F-12-04', 'INSTOCK', 'SB-2026-0003 顺序4'),
+    (46, 'SLB-0205', 12, 180, 61, 2.0, 1.10, 'FLAMED', 'A', 'F-12-05', 'INSTOCK', 'SB-2026-0003 顺序5');
 
 -- ---------------------------- 加工工单 ----------------------------
 INSERT INTO mill_cutting_order (id, order_no, block_id, saw_type, plan_count, done_count,
@@ -276,8 +463,8 @@ INSERT INTO mill_cutting_order (id, order_no, block_id, saw_type, plan_count, do
     (8, 'CO-2026-0008', 8, 'DISC', 4, 3, '2026-07-20', NULL, '乙班', 'PROCESSING', '圆盘锯吃刀量调小'),
     (9, 'CO-2026-0009', 9, 'COMBO', 6, 0, NULL, NULL, '丙班', 'PENDING', '待荒料 009 到厂后开工'),
     (10, 'CO-2026-0010', 10, 'WIRE', 6, 0, NULL, NULL, '甲班', 'PENDING', '待荒料 010 到厂后开工'),
-    (11, 'CO-2026-0011', 11, 'FRAME', 8, 0, NULL, NULL, '乙班', 'PENDING', '超大料，需两班倒'),
-    (12, 'CO-2026-0012', 12, 'DISC', 5, 0, NULL, NULL, '丙班', 'PENDING', '色差控制，单片留样');
+    (11, 'CO-2026-0011', 11, 'FRAME', 8, 4, '2026-09-15', NULL, '乙班', 'PROCESSING', '分两批锯切：SB-2026-0001 已收口 4 片，0002 差异待核'),
+    (12, 'CO-2026-0012', 12, 'DISC', 5, 0, '2026-10-01', NULL, '丙班', 'PROCESSING', 'SB-2026-0003 已开锯交接，零差异待收口');
 
 -- ---------------------------- 排板方案 ----------------------------
 INSERT INTO mill_layout_item (id, block_id, slab_id, x_pos, y_pos, item_width, item_height, seq_no, waste_rate) VALUES
@@ -314,7 +501,21 @@ INSERT INTO mill_layout_item (id, block_id, slab_id, x_pos, y_pos, item_width, i
     (31, 8, 31, 0, 0, 140, 80, 1, 11.37),
     (32, 8, 32, 140, 0, 135, 80, 2, 11.37),
     (33, 8, 33, 0, 80, 130, 75, 3, 11.37),
-    (34, 8, 34, 130, 80, 125, 75, 4, 11.37);
+    (34, 8, 34, 130, 80, 125, 75, 4, 11.37),
+    -- 荒料 011（370×225 切面）两班倒共 8 片，90×105，单层排布；荒料 012（310×195）5 片 180×61
+    (35, 11, 35, 0, 0, 90, 105, 1, 9.19),
+    (36, 11, 36, 90, 0, 90, 105, 2, 9.19),
+    (37, 11, 37, 180, 0, 90, 105, 3, 9.19),
+    (38, 11, 38, 270, 0, 90, 105, 4, 9.19),
+    (39, 11, 39, 0, 105, 90, 105, 5, 9.19),
+    (40, 11, 40, 90, 105, 90, 105, 6, 9.19),
+    (41, 11, NULL, 180, 105, 90, 105, 7, 9.19),
+    (42, 11, 41, 270, 105, 90, 105, 8, 9.19),
+    (43, 12, 42, 0, 0, 180, 61, 1, 9.18),
+    (44, 12, 43, 0, 61, 180, 61, 2, 9.18),
+    (45, 12, 44, 0, 122, 180, 61, 3, 9.18),
+    (46, 12, 45, 130, 0, 180, 61, 4, 9.18),
+    (47, 12, 46, 130, 61, 180, 61, 5, 9.18);
 
 -- ---------------------------- 出库发货单 ----------------------------
 INSERT INTO mill_delivery (id, delivery_no, customer, contact, phone, plate_no, driver,
@@ -399,7 +600,147 @@ INSERT INTO mill_quality_event (id, hold_id, event_type, from_status, to_status,
     (11, 5, 'SUBMIT_RECHECK', 'ISOLATED', 'PENDING_RECHECK', NULL, '玉石件，转资深质检评定可修复性。', '质检-高主管', '2026-08-15 10:20:00'),
     (12, 5, 'SCRAP', 'PENDING_RECHECK', 'SCRAPPED', 'SCRAP', '贯穿性裂纹不可修复，判定报废，禁止再次流转；已发运签收，发货历史不倒改。', '质检-高主管', '2026-08-15 13:30:00');
 
--- 隔离记录号序列：种子已占用 QH-2026-0001~0005
-INSERT INTO mill_seq (seq_key, seq_value) VALUES ('QH-2026', 5);
+-- 单据号序列：种子已占用 QH-2026-0001~0005、SB-2026-0001~0003
+INSERT INTO mill_seq (seq_key, seq_value) VALUES
+    ('QH-2026', 5),
+    ('SB-2026', 3);
+
+-- ============================================================================
+-- 模块八验收种子：锯切批次交接与产出谱系
+--   SB-2026-0001 计划吻合：4 片全部合格，已收口，工单 11 完成数 = 4（收口推进）
+--   SB-2026-0002 数量/差异待核：缺号(顺序8) + 尺寸超差(顺序6) + 未解释锯耗(顺序7) + 数量不符，
+--               批次挂起不能收口，工单完成数停在 4；含 1 片计划外可返切余料
+--   SB-2026-0003 计划吻合但尚未收口：5 片零差异，已交接 WAIT_CHECK，供两人同时收口 / 重复点击验收
+--   跨批次重复扫码、离线重试、差异逐项更正、返切引用保护走现场接口验收（见 acceptance 脚本）
+-- ============================================================================
+
+-- ---------------------------- 锯切批次 ----------------------------
+INSERT INTO mill_saw_batch (id, batch_no, order_id, block_id, saw_type, team,
+                            snap_order_no, snap_block_code, snap_plan_count, plan_count,
+                            size_tolerance_cm, status, handed_over_by, handed_over_at,
+                            closed_finished, closed_remnant, closed_loss, closed_void,
+                            closed_by, closed_at, closed_remark, open_diff_count,
+                            version, created_at, updated_at) VALUES
+    (1, 'SB-2026-0001', 11, 11, 'FRAME', '乙班',
+     'CO-2026-0011', 'BLK-2026-011', 8, 4, 2, 'CLOSED', '锯工-赵大锤', '2026-09-18 16:05:00',
+     4, 0, 0, 0, '生产主管-冯主任', '2026-09-18 17:10:00', '首批 4 片计划吻合，谱系固化，工单推进 +4', 0,
+     1, '2026-09-15 08:00:00', '2026-09-18 17:10:00'),
+    (2, 'SB-2026-0002', 11, 11, 'FRAME', '乙班',
+     'CO-2026-0011', 'BLK-2026-011', 8, 4, 2, 'WAIT_CHECK', '锯工-赵大锤', '2026-09-20 15:40:00',
+     NULL, NULL, NULL, NULL, NULL, NULL, NULL, 4,
+     0, '2026-09-19 08:00:00', '2026-09-20 15:40:00'),
+    (3, 'SB-2026-0003', 12, 12, 'DISC', '丙班',
+     'CO-2026-0012', 'BLK-2026-012', 5, 5, 2, 'WAIT_CHECK', '锯工-孙铁柱', '2026-10-02 09:35:00',
+     NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0,
+     0, '2026-10-01 08:10:00', '2026-10-02 09:35:00');
+
+-- ---------------------------- 批次冻结排板顺序 ----------------------------
+INSERT INTO mill_saw_plan (id, batch_id, seq_no, plan_length_cm, plan_width_cm, layout_item_id, slab_code) VALUES
+    -- 批次 1：顺序 1~4
+    (1,  1, 1, 90, 105, 35, 'SLB-0101'),
+    (2,  1, 2, 90, 105, 36, 'SLB-0102'),
+    (3,  1, 3, 90, 105, 37, 'SLB-0103'),
+    (4,  1, 4, 90, 105, 38, 'SLB-0104'),
+    -- 批次 2：顺序 5~8
+    (5,  2, 5, 90, 105, 39, 'SLB-0105'),
+    (6,  2, 6, 90, 105, 40, 'SLB-0106'),
+    (7,  2, 7, 90, 105, 41, NULL),
+    (8,  2, 8, 90, 105, 42, 'SLB-0107'),
+    -- 批次 3：顺序 1~5
+    (9,  3, 1, 180, 61, 43, 'SLB-0201'),
+    (10, 3, 2, 180, 61, 44, 'SLB-0202'),
+    (11, 3, 3, 180, 61, 45, 'SLB-0203'),
+    (12, 3, 4, 180, 61, 46, 'SLB-0204'),
+    (13, 3, 5, 180, 61, 47, 'SLB-0205');
+
+-- ---------------------------- 逐片产出 ----------------------------
+-- 批次 1：4 片成品，尺寸与计划逐片吻合（token 为 PDA 扫码幂等令牌）
+INSERT INTO mill_saw_output (id, batch_id, client_token, slab_id, slab_code, output_type, seq_no,
+                             actual_length_cm, actual_width_cm, thickness_cm, source_slab_id, source_output_id,
+                             operator, produced_at, note, status, void_reason, void_by, void_at, created_at) VALUES
+    (1,  1, 'seed-SB0001-seq1', 35, 'SLB-0101', 'FINISHED', 1, 90, 105, 2.0, NULL, NULL,
+     '锯工-赵大锤', '2026-09-18 15:50:00', NULL, 'LIVE', NULL, NULL, NULL, '2026-09-18 15:50:00'),
+    (2,  1, 'seed-SB0001-seq2', 36, 'SLB-0102', 'FINISHED', 2, 90, 105, 2.0, NULL, NULL,
+     '锯工-赵大锤', '2026-09-18 15:55:00', NULL, 'LIVE', NULL, NULL, NULL, '2026-09-18 15:55:00'),
+    (3,  1, 'seed-SB0001-seq3', 37, 'SLB-0103', 'FINISHED', 3, 90, 105, 2.0, NULL, NULL,
+     '锯工-赵大锤', '2026-09-18 16:00:00', NULL, 'LIVE', NULL, NULL, NULL, '2026-09-18 16:00:00'),
+    (4,  1, 'seed-SB0001-seq4', 38, 'SLB-0104', 'FINISHED', 4, 90, 105, 2.0, NULL, NULL,
+     '锯工-赵大锤', '2026-09-18 16:05:00', NULL, 'LIVE', NULL, NULL, NULL, '2026-09-18 16:05:00'),
+-- 批次 2：顺序5 合格 / 顺序6 实测 85cm 超差 / 顺序7 锯耗但未填原因 / 顺序8 缺号；另 1 片计划外余料
+    (5,  2, 'seed-SB0002-seq5', 39, 'SLB-0105', 'FINISHED', 5, 90, 105, 2.0, NULL, NULL,
+     '锯工-赵大锤', '2026-09-20 14:40:00', NULL, 'LIVE', NULL, NULL, NULL, '2026-09-20 14:40:00'),
+    (6,  2, 'seed-SB0002-seq6', 40, 'SLB-0106', 'FINISHED', 6, 85, 105, 2.0, NULL, NULL,
+     '锯工-赵大锤', '2026-09-20 15:05:00', NULL, 'LIVE', NULL, NULL, NULL, '2026-09-20 15:05:00'),
+    (7,  2, 'seed-SB0002-loss7', NULL, NULL, 'SAW_LOSS', 7, NULL, NULL, NULL, NULL, NULL,
+     '锯工-钱二', '2026-09-20 15:20:00', NULL, 'LIVE', NULL, NULL, NULL, '2026-09-20 15:20:00'),
+    (8,  2, 'seed-SB0002-rem', 41, 'SLB-0107', 'REMNANT', NULL, 60, 80, 2.0, NULL, NULL,
+     '锯工-赵大锤', '2026-09-20 15:30:00', NULL, 'LIVE', NULL, NULL, NULL, '2026-09-20 15:30:00'),
+-- 批次 3：5 片成品逐片吻合，零差异
+    (9,  3, 'seed-SB0003-seq1', 42, 'SLB-0201', 'FINISHED', 1, 180, 61, 2.0, NULL, NULL,
+     '锯工-孙铁柱', '2026-10-02 08:50:00', NULL, 'LIVE', NULL, NULL, NULL, '2026-10-02 08:50:00'),
+    (10, 3, 'seed-SB0003-seq2', 43, 'SLB-0202', 'FINISHED', 2, 180, 61, 2.0, NULL, NULL,
+     '锯工-孙铁柱', '2026-10-02 08:58:00', NULL, 'LIVE', NULL, NULL, NULL, '2026-10-02 08:58:00'),
+    (11, 3, 'seed-SB0003-seq3', 44, 'SLB-0203', 'FINISHED', 3, 180, 61, 2.0, NULL, NULL,
+     '锯工-孙铁柱', '2026-10-02 09:06:00', NULL, 'LIVE', NULL, NULL, NULL, '2026-10-02 09:06:00'),
+    (12, 3, 'seed-SB0003-seq4', 45, 'SLB-0204', 'FINISHED', 4, 180, 61, 2.0, NULL, NULL,
+     '锯工-孙铁柱', '2026-10-02 09:15:00', NULL, 'LIVE', NULL, NULL, NULL, '2026-10-02 09:15:00'),
+    (13, 3, 'seed-SB0003-seq5', 46, 'SLB-0205', 'FINISHED', 5, 180, 61, 2.0, NULL, NULL,
+     '锯工-孙铁柱', '2026-10-02 09:30:00', NULL, 'LIVE', NULL, NULL, NULL, '2026-10-02 09:30:00');
+
+-- ---------------------------- 差异待核（批次 2，四条 OPEN 阻断收口） ----------------------------
+INSERT INTO mill_saw_diff (id, batch_id, diff_type, seq_no, slab_id, slab_code, detail,
+                           status, resolution, resolve_reason, resolved_by, resolved_at, created_at) VALUES
+    (1, 2, 'SIZE_TOL', 6, 40, 'SLB-0106',
+     '顺序6 计划 90×105cm，实测 85×105cm，长偏差 -5cm，超出容差 ±2cm',
+     'OPEN', NULL, NULL, NULL, NULL, '2026-09-20 15:40:00'),
+    (2, 2, 'SAW_LOSS_UNEXPLAINED', 7, NULL, NULL,
+     '顺序7 登记为锯耗但未填写损耗原因与确认人，无法核对去向（需补原因或改判）',
+     'OPEN', NULL, NULL, NULL, NULL, '2026-09-20 15:40:00'),
+    (3, 2, 'MISSING_NO', 8, NULL, NULL,
+     '顺序8 计划 90×105cm，交接时无任何产出（缺号：既无成品/余料，也无锯耗登记）',
+     'OPEN', NULL, NULL, NULL, NULL, '2026-09-20 15:40:00'),
+    (4, 2, 'COUNT_MISMATCH', NULL, NULL, NULL,
+     '本批冻结顺序 4 个：成品实产 2 片（含超差 1 片）、可返切余料 1 片（计划外）、锯耗 1 片（未解释），成品比计划少 2 片',
+     'OPEN', NULL, NULL, NULL, NULL, '2026-09-20 15:40:00');
+
+-- ---------------------------- 逐片登记审计（只追加） ----------------------------
+INSERT INTO mill_saw_change (id, batch_id, output_id, change_type, from_batch_id, to_batch_id,
+                             before_json, after_json, reason, operator, created_at) VALUES
+    (1,  1, 1,  'REGISTER', NULL, 1, NULL,
+     '{"slab":"SLB-0101","type":"FINISHED","seq":1,"size":"90x105"}', '交接扫码登记', '锯工-赵大锤', '2026-09-18 15:50:00'),
+    (2,  1, 2,  'REGISTER', NULL, 1, NULL,
+     '{"slab":"SLB-0102","type":"FINISHED","seq":2,"size":"90x105"}', '交接扫码登记', '锯工-赵大锤', '2026-09-18 15:55:00'),
+    (3,  1, 3,  'REGISTER', NULL, 1, NULL,
+     '{"slab":"SLB-0103","type":"FINISHED","seq":3,"size":"90x105"}', '交接扫码登记', '锯工-赵大锤', '2026-09-18 16:00:00'),
+    (4,  1, 4,  'REGISTER', NULL, 1, NULL,
+     '{"slab":"SLB-0104","type":"FINISHED","seq":4,"size":"90x105"}', '交接扫码登记', '锯工-赵大锤', '2026-09-18 16:05:00'),
+    (5,  2, 5,  'REGISTER', NULL, 2, NULL,
+     '{"slab":"SLB-0105","type":"FINISHED","seq":5,"size":"90x105"}', '交接扫码登记', '锯工-赵大锤', '2026-09-20 14:40:00'),
+    (6,  2, 6,  'REGISTER', NULL, 2, NULL,
+     '{"slab":"SLB-0106","type":"FINISHED","seq":6,"size":"85x105"}', '交接扫码登记（实测）', '锯工-赵大锤', '2026-09-20 15:05:00'),
+    (7,  2, 7,  'REGISTER', NULL, 2, NULL,
+     '{"type":"SAW_LOSS","seq":7,"reason":null}', '交接登记锯耗，原因待补', '锯工-钱二', '2026-09-20 15:20:00'),
+    (8,  2, 8,  'REGISTER', NULL, 2, NULL,
+     '{"slab":"SLB-0107","type":"REMNANT","seq":null,"size":"60x80"}', '边角可返切余料，计划外登记', '锯工-赵大锤', '2026-09-20 15:30:00'),
+    (9,  3, 9,  'REGISTER', NULL, 3, NULL,
+     '{"slab":"SLB-0201","type":"FINISHED","seq":1,"size":"180x61"}', '交接扫码登记', '锯工-孙铁柱', '2026-10-02 08:50:00'),
+    (10, 3, 10, 'REGISTER', NULL, 3, NULL,
+     '{"slab":"SLB-0202","type":"FINISHED","seq":2,"size":"180x61"}', '交接扫码登记', '锯工-孙铁柱', '2026-10-02 08:58:00'),
+    (11, 3, 11, 'REGISTER', NULL, 3, NULL,
+     '{"slab":"SLB-0203","type":"FINISHED","seq":3,"size":"180x61"}', '交接扫码登记', '锯工-孙铁柱', '2026-10-02 09:06:00'),
+    (12, 3, 12, 'REGISTER', NULL, 3, NULL,
+     '{"slab":"SLB-0204","type":"FINISHED","seq":4,"size":"180x61"}', '交接扫码登记', '锯工-孙铁柱', '2026-10-02 09:15:00'),
+    (13, 3, 13, 'REGISTER', NULL, 3, NULL,
+     '{"slab":"SLB-0205","type":"FINISHED","seq":5,"size":"180x61"}', '交接扫码登记', '锯工-孙铁柱', '2026-10-02 09:30:00');
+
+-- ---------------------------- 批次生命周期留痕（只追加） ----------------------------
+INSERT INTO mill_saw_event (id, batch_id, event_type, from_status, to_status, content, operator, created_at) VALUES
+    (1, 1, 'CREATE',   NULL,        'OPEN',       '乙班开锯：冻结荒料 BLK-2026-011、工单 CO-2026-0011、框架锯、顺序 1~4（90×105cm）', '锯工-赵大锤', '2026-09-15 08:00:00'),
+    (2, 1, 'HANDOVER', 'OPEN',      'WAIT_CHECK', '首批 4 片全部登记，计划吻合，无差异', '锯工-赵大锤', '2026-09-18 16:05:00'),
+    (3, 1, 'CLOSE',    'WAIT_CHECK','CLOSED',     '差异 0 条，收口固化谱系 4 片成品，工单完成数推进至 4', '生产主管-冯主任', '2026-09-18 17:10:00'),
+    (4, 2, 'CREATE',   NULL,        'OPEN',       '乙班第二批开锯：冻结顺序 5~8（90×105cm），容差 ±2cm', '锯工-赵大锤', '2026-09-19 08:00:00'),
+    (5, 2, 'HANDOVER', 'OPEN',      'WAIT_CHECK', '交接完成：2 成品（1 片超差）+1 锯耗（原因待补）+1 计划外余料，顺序8 缺号，挂差异 4 条待核', '锯工-赵大锤', '2026-09-20 15:40:00'),
+    (6, 3, 'CREATE',   NULL,        'OPEN',       '丙班开锯：冻结荒料 BLK-2026-012、工单 CO-2026-0012、圆盘锯、顺序 1~5（180×61cm）', '锯工-孙铁柱', '2026-10-01 08:10:00'),
+    (7, 3, 'HANDOVER', 'OPEN',      'WAIT_CHECK', '5 片全部登记，计划吻合，无差异，待负责人收口', '锯工-孙铁柱', '2026-10-02 09:35:00');
 
 SET FOREIGN_KEY_CHECKS = 1;

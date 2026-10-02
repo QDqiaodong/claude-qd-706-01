@@ -42,19 +42,22 @@ public class SlabService {
     private final SlabRepository slabRepository;
     private final BlockRepository blockRepository;
     private final QualityHoldService qualityHoldService;
+    private final SawBatchService sawBatchService;
 
     public SlabService(SlabRepository slabRepository, BlockRepository blockRepository,
-                       QualityHoldService qualityHoldService) {
+                       QualityHoldService qualityHoldService, SawBatchService sawBatchService) {
         this.slabRepository = slabRepository;
         this.blockRepository = blockRepository;
         this.qualityHoldService = qualityHoldService;
+        this.sawBatchService = sawBatchService;
     }
 
     public PageResult<SlabView> page(SlabQuery query) {
         Map<Long, Block> blocks = blockMap();
         Map<Long, QualityHold> holds = qualityHoldService.activeHoldBySlabMap();
+        Map<Long, java.util.Map<String, Object>> tracked = sawBatchService.slabTrackedMap();
         List<SlabView> rows = slabRepository.search(query).stream()
-                .map(slab -> toView(slab, blocks, holds))
+                .map(slab -> toView(slab, blocks, holds, tracked))
                 .collect(Collectors.toList());
         return new PageResult<>(rows, slabRepository.count(query),
                 query.getPage(), query.getSize());
@@ -64,7 +67,7 @@ public class SlabService {
     public PageResult<SlabView> shippable(ShippableQuery query) {
         Map<Long, Block> blocks = blockMap();
         List<SlabView> rows = slabRepository.searchShippable(query).stream()
-                .map(slab -> toView(slab, blocks, java.util.Map.of()))
+                .map(slab -> toView(slab, blocks, java.util.Map.of(), java.util.Map.of()))
                 .collect(Collectors.toList());
         return new PageResult<>(rows, slabRepository.countShippable(query),
                 query.getPage(), query.getSize());
@@ -77,14 +80,16 @@ public class SlabService {
     public List<SlabView> listByBlock(Long blockId) {
         Map<Long, Block> blocks = blockMap();
         Map<Long, QualityHold> holds = qualityHoldService.activeHoldBySlabMap();
+        Map<Long, java.util.Map<String, Object>> tracked = sawBatchService.slabTrackedMap();
         return slabRepository.listByBlock(blockId).stream()
-                .map(slab -> toView(slab, blocks, holds))
+                .map(slab -> toView(slab, blocks, holds, tracked))
                 .collect(Collectors.toList());
     }
 
     public SlabView detail(Long id) {
         Slab slab = slabRepository.findById(id).orElseThrow(() -> new BizException("大板不存在：id=" + id));
-        return toView(slab, blockMap(), qualityHoldService.activeHoldBySlabMap());
+        return toView(slab, blockMap(), qualityHoldService.activeHoldBySlabMap(),
+                sawBatchService.slabTrackedMap());
     }
 
     @Transactional
@@ -121,7 +126,8 @@ public class SlabService {
                 .multiply(BigDecimal.valueOf(req.getWidthCm()))
                 .divide(BigDecimal.valueOf(10000), 2, RoundingMode.HALF_UP));
         slabRepository.save(slab);
-        return toView(slab, blockMap(), qualityHoldService.activeHoldBySlabMap());
+        return toView(slab, blockMap(), qualityHoldService.activeHoldBySlabMap(),
+                sawBatchService.slabTrackedMap());
     }
 
     @Transactional
@@ -147,7 +153,8 @@ public class SlabService {
             slab.setRemark(req.getRemark());
         }
         slabRepository.save(slab);
-        return toView(slab, blockMap(), qualityHoldService.activeHoldBySlabMap());
+        return toView(slab, blockMap(), qualityHoldService.activeHoldBySlabMap(),
+                sawBatchService.slabTrackedMap());
     }
 
     private Map<Long, Block> blockMap() {
@@ -155,7 +162,8 @@ public class SlabService {
                 .collect(Collectors.toMap(Block::getId, Function.identity(), (a, b) -> a));
     }
 
-    private SlabView toView(Slab slab, Map<Long, Block> blocks, Map<Long, QualityHold> holds) {
+    private SlabView toView(Slab slab, Map<Long, Block> blocks, Map<Long, QualityHold> holds,
+                                Map<Long, java.util.Map<String, Object>> tracked) {
         Block block = blocks.get(slab.getBlockId());
         SlabView view = new SlabView();
         view.setId(slab.getId());
@@ -183,6 +191,13 @@ public class SlabService {
             view.setQualityHoldStatus(hold.getStatus());
             view.setQualityHoldStatusName(StoneDict.holdStatusName(hold.getStatus()));
             view.setQualityDefectName(StoneDict.defectTypeName(hold.getDefectType()));
+        }
+        java.util.Map<String, Object> trackedSlab = tracked.get(slab.getId());
+        if (trackedSlab != null) {
+            view.setSawTracked(true);
+            view.setSawBatchNo((String) trackedSlab.get("batchNo"));
+            view.setSawOutputTypeName(StoneDict.outputTypeName((String) trackedSlab.get("outputType")));
+            view.setSawBatchClosed(Boolean.TRUE.equals(trackedSlab.get("closed")));
         }
         return view;
     }

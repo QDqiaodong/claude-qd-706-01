@@ -18,8 +18,10 @@ import com.stone.mill.dto.Views.CuttingOrderView;
 import com.stone.mill.dto.Views.PageResult;
 import com.stone.mill.entity.Block;
 import com.stone.mill.entity.CuttingOrder;
+import com.stone.mill.entity.SawBatch;
 import com.stone.mill.repository.BlockRepository;
 import com.stone.mill.repository.CuttingOrderRepository;
+import com.stone.mill.repository.SawBatchRepository;
 
 /**
  * 模块三：加工工单。
@@ -37,10 +39,13 @@ public class CuttingOrderService {
 
     private final CuttingOrderRepository orderRepository;
     private final BlockRepository blockRepository;
+    private final SawBatchRepository sawBatchRepository;
 
-    public CuttingOrderService(CuttingOrderRepository orderRepository, BlockRepository blockRepository) {
+    public CuttingOrderService(CuttingOrderRepository orderRepository, BlockRepository blockRepository,
+                               SawBatchRepository sawBatchRepository) {
         this.orderRepository = orderRepository;
         this.blockRepository = blockRepository;
+        this.sawBatchRepository = sawBatchRepository;
     }
 
     public PageResult<CuttingOrderView> page(OrderQuery query) {
@@ -111,10 +116,20 @@ public class CuttingOrderService {
         return toView(order, blockMap());
     }
 
-    /** 登记完成板数（累加，不得超过计划板数）。 */
+    /**
+     * 登记完成板数（累加，不得超过计划板数）。
+     *
+     * <p>模块八：一旦工单建立过锯切批次，完成数只能由批次收口按合格实产推进，
+     * 手工 +N 入口关闭——避免未经核清的差异提前增加工单完成数。
+     * 尚无批次的旧工单保持原口径（详情页会明确标「待补交接」）。
+     */
     @Transactional
     public CuttingOrderView progress(Long id, ProgressReq req) {
         CuttingOrder order = require(id);
+        if (sawBatchRepository.existsByOrder(id)) {
+            throw new BizException("该工单已按锯切批次交接管理，完成板数由批次收口按合格实产自动推进，"
+                    + "不能再手工 +N；请在批次详情核清差异后收口");
+        }
         if ("SETTLED".equals(order.getStatus())) {
             throw new BizException("已结算的工单不能再登记进度");
         }
@@ -138,6 +153,10 @@ public class CuttingOrderService {
     @Transactional
     public CuttingOrderView finish(Long id) {
         CuttingOrder order = require(id);
+        if (sawBatchRepository.existsByOrder(id)) {
+            throw new BizException("该工单已按锯切批次交接管理，完工由批次收口在合格实产达到计划时自动判定，"
+                    + "不能手工完工");
+        }
         if ("DONE".equals(order.getStatus()) || "SETTLED".equals(order.getStatus())) {
             throw new BizException("该工单已经完工");
         }
@@ -199,6 +218,15 @@ public class CuttingOrderService {
         view.setStatus(order.getStatus());
         view.setStatusName(StoneDict.orderStatusName(order.getStatus()));
         view.setRemark(order.getRemark());
+
+        // 模块八：批次谱系汇总。无批次的旧工单 batchManaged=false，前端明确标「待补交接」
+        List<SawBatch> batches = sawBatchRepository.listByOrder(order.getId());
+        view.setBatchManaged(!batches.isEmpty());
+        view.setBatchCount(batches.size());
+        view.setClosedBatchCount((int) batches.stream().filter(b -> "CLOSED".equals(b.getStatus())).count());
+        view.setOpenDiffCount(batches.stream()
+                .mapToInt(b -> b.getOpenDiffCount() == null ? 0 : b.getOpenDiffCount()).sum());
+        view.setClosedFinishedTotal(sawBatchRepository.sumClosedFinishedByOrder(order.getId()));
         return view;
     }
 }

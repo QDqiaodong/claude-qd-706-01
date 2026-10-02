@@ -129,4 +129,18 @@ public final class Queries {
         private String orderBy = "time";
         private boolean desc = true;
     }
+
+    /** 锯切批次筛选：工单 / 荒料 / 批次状态 / 班组 / 批次号模糊 */
+    @Data
+    public static class SawBatchQuery extends BaseQuery {
+
+        private Long orderId;
+        private Long blockId;
+        private String status;
+        private String team;
+        private String keyword;
+        /** time / code */
+        private String orderBy = "time";
+        private boolean desc = true;
+    }
 }
